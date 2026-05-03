@@ -596,28 +596,15 @@ function App() {
     setStep(4);
 
     try {
-      // Timer-based progress dla Demucs (1–3 min, nieznany job_id przed startem)
-      const demucsSteps = [
-        "Wysyłam audio do sidecara...",
-        "Ładuję model htdemucs...",
-        "Separuję stemy AI (to zajmuje 1–3 min)...",
-        "Separuję warstwę perkusji...",
-        "Separuję warstwę basu...",
-        "Separuję melodię i wokale...",
-        "Zapisuję stemy na dysk...",
-      ];
-      let demucsStepIdx = 0;
-      setSseProgress({step: 0, total: demucsSteps.length, label: demucsSteps[0]});
-      const demucsTimer = setInterval(() => {
-        demucsStepIdx = Math.min(demucsStepIdx + 1, demucsSteps.length - 1);
-        setSseProgress({step: demucsStepIdx, total: demucsSteps.length, label: demucsSteps[demucsStepIdx]});
-      }, 14000); // co 14s ~ 98s total dla 7 kroków
-
+      setSseProgress({ step: 0, total: 4, label: "Wysyłam audio do sidecara..." });
       setGenerateStage("Separuję stemy (AI Demucs)...");
-      const stemPackage = await separateWithProSidecar(selectedFile);
-      clearInterval(demucsTimer);
+      const stemPackage = await separateWithProSidecar(selectedFile, {
+        onProgress: (p) => {
+          setSseProgress({ step: p.step, total: p.total, label: p.label });
+        },
+      });
       setStemPackageResult(stemPackage as typeof stemPackageResult);
-      setSseProgress({step: demucsSteps.length, total: demucsSteps.length, label: "Separacja stemów zakończona ✓"});
+      setSseProgress({ step: 4, total: 4, label: "Separacja stemów zakończona ✓" });
 
       setGenerateStage("Buduję plan aranżacji...");
       const planRequest: PlannerRequest = {

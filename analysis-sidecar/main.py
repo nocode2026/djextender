@@ -180,6 +180,11 @@ class StemSeparationResult(BaseModel):
     stemEngine: Literal["demucs-sidecar"]
 
 
+class StemStartResult(BaseModel):
+    jobId: str
+    status: Literal["started"]
+
+
 class RenderedTake(BaseModel):
     takeIndex: int
     label: str
@@ -316,6 +321,23 @@ async def get_render_result(job_id: str):
     result = _job_results.get(job_id)
     if result is None:
         raise HTTPException(status_code=500, detail="Job done but result not stored")
+    return result
+
+
+@app.get("/stem_result/{job_id}")
+async def get_stem_result(job_id: str):
+    """Zwraca wynik separacji stemów gdy done=True, lub 202 gdy jeszcze trwa."""
+    progress = _job_progress.get(job_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail=f"Stem job {job_id} not found")
+    if progress.get("error"):
+        raise HTTPException(status_code=500, detail=progress["error"])
+    if not progress.get("done"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=202, content={"status": "pending", "jobId": job_id})
+    result = _job_results.get(job_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Stem job done but result not stored")
     return result
 
 
@@ -1536,8 +1558,8 @@ async def generate_stable(
     )
 
 
-@app.post("/separate", response_model=StemSeparationResult)
-async def separate(file: UploadFile = File(...)) -> StemSeparationResult:
+@app.post("/separate", response_model=StemStartResult, status_code=202)
+async def separate(file: UploadFile = File(...)) -> StemStartResult:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
@@ -1548,94 +1570,101 @@ async def separate(file: UploadFile = File(...)) -> StemSeparationResult:
     base_name = Path(file.filename).stem
     safe_name = "".join(character if character.isalnum() else "_" for character in base_name)
     job_id = uuid4().hex[:12]
-    _set_progress(job_id, 0, 4, "Uploading audio...")
+    _set_progress(job_id, 0, 4, "Queued for stem separation...")
 
-    with tempfile.TemporaryDirectory(prefix="djextender_sidecar_") as temp_root:
-        temp_root_path = Path(temp_root)
-        input_path = temp_root_path / f"{safe_name}.wav"
-        output_root = temp_root_path / "demucs_out"
-        output_root.mkdir(parents=True, exist_ok=True)
-        input_path.write_bytes(raw)
-        _set_progress(job_id, 1, 4, "Running Demucs AI stem separation (1–3 min)...")
-
-        command = [
-            sys.executable,
-            "-m",
-            "demucs.separate",
-            "--name",
-            "htdemucs",
-            "--out",
-            str(output_root),
-            str(input_path),
-        ]
-
-        try:
-            await asyncio.to_thread(
-                subprocess.run,
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1800,
-            )
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=500, detail="Python executable not found for Demucs") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(status_code=500, detail="Demucs separation timed out") from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr[-4000:] if exc.stderr else "Unknown Demucs error"
-            raise HTTPException(status_code=500, detail=f"Demucs failed: {stderr}") from exc
-
-        _set_progress(job_id, 2, 4, "Saving stems...")
-        demucs_folder = output_root / "htdemucs" / input_path.stem
-        if not demucs_folder.exists():
-            raise HTTPException(status_code=500, detail="Demucs output folder missing")
-
-        persistent_root = Path.cwd() / "runs" / "stems" / job_id
-        persistent_root.mkdir(parents=True, exist_ok=True)
-
-        stems: list[StemFile] = []
-        warnings: list[str] = []
-        for stem_name in ("drums", "bass", "other", "vocals"):
-            source_path = demucs_folder / f"{stem_name}.wav"
-            target_path = persistent_root / f"{stem_name}.wav"
-            if source_path.exists():
-                shutil.copy2(source_path, target_path)
-                size = target_path.stat().st_size
-                stems.append(
-                    StemFile(
-                        stem=stem_name,
-                        path=str(target_path),
-                        exists=True,
-                        sizeBytes=size,
-                    )
-                )
-            else:
-                warnings.append(f"Missing stem file: {stem_name}.wav")
-                stems.append(
-                    StemFile(
-                        stem=stem_name,
-                        path=str(target_path),
-                        exists=False,
-                        sizeBytes=0,
-                    )
-                )
-
-    is_ready = all(stem.exists for stem in stems)
-    if not is_ready:
-        warnings.append("Stem package incomplete. Block render until all required stems are present.")
-
-    _set_progress(job_id, 4, 4, "Stem separation complete", done=True)
-
-    return StemSeparationResult(
-        jobId=job_id,
-        model="htdemucs",
-        outputDirectory=str(Path.cwd() / "runs" / "stems" / job_id),
-        stems=stems,
-        isReady=is_ready,
-        warnings=warnings,
-        stemEngine="demucs-sidecar",
+    # Uruchamiamy ciężki Demucs w osobnym wątku — event loop pozostaje wolny
+    asyncio.get_event_loop().run_in_executor(
+        None, _run_separate_blocking, job_id, raw, safe_name
     )
+
+    return StemStartResult(jobId=job_id, status="started")
+
+
+def _run_separate_blocking(job_id: str, raw: bytes, safe_name: str) -> None:
+    """Synchroniczna separacja stemów przez Demucs — wykonywana w wątku tła."""
+    _sep_logger = logging.getLogger("djextender.separate")
+    try:
+        _set_progress(job_id, 0, 4, "Uploading audio...")
+        with tempfile.TemporaryDirectory(prefix="djextender_sidecar_") as temp_root:
+            temp_root_path = Path(temp_root)
+            input_path = temp_root_path / f"{safe_name}.wav"
+            output_root = temp_root_path / "demucs_out"
+            output_root.mkdir(parents=True, exist_ok=True)
+            input_path.write_bytes(raw)
+            _set_progress(job_id, 1, 4, "Running Demucs AI stem separation (1–3 min)...")
+
+            command = [
+                sys.executable,
+                "-m",
+                "demucs.separate",
+                "--name",
+                "htdemucs",
+                "--out",
+                str(output_root),
+                str(input_path),
+            ]
+
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                )
+            except FileNotFoundError as exc:
+                _set_progress(job_id, -1, 4, f"Error: {exc}", error="Python executable not found for Demucs")
+                return
+            except subprocess.TimeoutExpired:
+                _set_progress(job_id, -1, 4, "Error: Demucs timed out", error="Demucs separation timed out after 30min")
+                return
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr[-4000:] if exc.stderr else "Unknown Demucs error"
+                _set_progress(job_id, -1, 4, f"Error: Demucs failed", error=f"Demucs failed: {stderr}")
+                return
+
+            _set_progress(job_id, 2, 4, "Saving stems...")
+            demucs_folder = output_root / "htdemucs" / input_path.stem
+            if not demucs_folder.exists():
+                _set_progress(job_id, -1, 4, "Error: Demucs output folder missing", error="Demucs output folder missing")
+                return
+
+            persistent_root = Path.cwd() / "runs" / "stems" / job_id
+            persistent_root.mkdir(parents=True, exist_ok=True)
+
+            stems: list[StemFile] = []
+            warnings: list[str] = []
+            for stem_name in ("drums", "bass", "other", "vocals"):
+                source_path = demucs_folder / f"{stem_name}.wav"
+                target_path = persistent_root / f"{stem_name}.wav"
+                if source_path.exists():
+                    shutil.copy2(source_path, target_path)
+                    size = target_path.stat().st_size
+                    stems.append(StemFile(stem=stem_name, path=str(target_path), exists=True, sizeBytes=size))  # type: ignore[arg-type]
+                else:
+                    warnings.append(f"Missing stem file: {stem_name}.wav")
+                    stems.append(StemFile(stem=stem_name, path=str(target_path), exists=False, sizeBytes=0))  # type: ignore[arg-type]
+
+        is_ready = all(s.exists for s in stems)
+        if not is_ready:
+            warnings.append("Stem package incomplete. Block render until all required stems are present.")
+
+        result = StemSeparationResult(
+            jobId=job_id,
+            model="htdemucs",
+            outputDirectory=str(Path.cwd() / "runs" / "stems" / job_id),
+            stems=stems,
+            isReady=is_ready,
+            warnings=warnings,
+            stemEngine="demucs-sidecar",
+        )
+        _job_results[job_id] = result.model_dump()
+        _set_progress(job_id, 4, 4, "Stem separation complete", done=True)
+
+    except Exception as exc:
+        _sep_logger.exception("[separate] Unhandled error in background stem job %s", job_id)
+        _set_progress(job_id, -1, 4, f"Error: {exc}", error=str(exc))
+
 
 
 @app.post("/render_extended", response_model=RenderStartResult, status_code=202)
