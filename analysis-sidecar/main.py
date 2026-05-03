@@ -52,6 +52,23 @@ def _load_local_env() -> None:
 
 _load_local_env()
 
+
+def _get_int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, falling back to %d", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+_AI_STAGE_TIMEOUT_SECONDS = _get_int_env("AI_STAGE_TIMEOUT_SECONDS", 600, minimum=30)
+_AI_STAGE_HEARTBEAT_SECONDS = _get_int_env("AI_STAGE_HEARTBEAT_SECONDS", 5, minimum=1)
+_STABLE_AUDIO_NUM_STEPS = _get_int_env("STABLE_AUDIO_NUM_STEPS", 100, minimum=10)
+
 # --- Stable Audio local model (lazy-loaded, singleton) ---
 _stable_audio_pipe = None
 _stable_audio_lock = threading.Lock()
@@ -708,7 +725,7 @@ def _generate_stable_to_file(
     clip_key: str = "",
     destination_path: Path,
     seed: int | None = None,
-    num_steps: int = 100,
+    num_steps: int = _STABLE_AUDIO_NUM_STEPS,
 ) -> tuple[int, float, list[str]]:
     """Generate audio using the local stabilityai/stable-audio-open-1.0 model."""
     import torch
@@ -1699,7 +1716,6 @@ async def render_extended(
 # Synchroniczna funkcja wykonywana w osobnym wątku (asyncio executor).
 # NIE może używać `await` ani FastAPI HTTP exceptions — zgłasza wyjątki Python.
 # ---------------------------------------------------------------------------
-_AI_STAGE_TIMEOUT_SECONDS = 180  # watchdog: maks. czas na jeden etap AI
 
 
 def _generate_stable_with_watchdog(
@@ -1726,19 +1742,27 @@ def _generate_stable_with_watchdog(
 
     t = threading.Thread(target=_target, daemon=True)
     deadline = time.time() + _AI_STAGE_TIMEOUT_SECONDS
+    start_time = time.time()
     t.start()
-    # Poll co 5s, aktualizuj heartbeat żeby frontend widział aktywność
+    # Poll co _AI_STAGE_HEARTBEAT_SECONDS, aktualizuj heartbeat żeby frontend widział aktywność
     while t.is_alive():
         remaining = deadline - time.time()
         if remaining <= 0:
             # Wątek AI nadal żyje po timeoucie — oznaczamy jako błąd w progress
             _set_progress(job_id, -1, 1, f"TIMEOUT: {step_label} (>{_AI_STAGE_TIMEOUT_SECONDS}s)", error=f"AI stage timeout: {step_label}")
             raise TimeoutError(f"AI stage '{step_label}' exceeded {_AI_STAGE_TIMEOUT_SECONDS}s watchdog limit")
-        t.join(timeout=5.0)
+        t.join(timeout=float(_AI_STAGE_HEARTBEAT_SECONDS))
         # Odśwież heartbeat żeby pokazać że jesteśmy aktywni
         entry = _job_progress.get(job_id)
         if entry:
             _job_progress[job_id] = {**entry, "last_heartbeat": time.time()}
+
+    logger.info(
+        "AI stage '%s' finished in %.1fs (watchdog limit: %ds)",
+        step_label,
+        time.time() - start_time,
+        _AI_STAGE_TIMEOUT_SECONDS,
+    )
 
     if exc_box:
         raise exc_box[0]
