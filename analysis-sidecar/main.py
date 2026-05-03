@@ -90,12 +90,25 @@ def _get_stable_audio_pipe():
 
 # --- Progress tracking (per-job) ---
 import asyncio
+import time
+import threading
 from collections import defaultdict
 
-_job_progress: dict[str, dict] = {}  # job_id -> {step, total, label, done, error}
+_job_progress: dict[str, dict] = {}  # job_id -> progress entry
+_job_results: dict[str, dict] = {}   # job_id -> serialized RenderExtendedResult (when done)
 
 def _set_progress(job_id: str, step: int, total: int, label: str, done: bool = False, error: str = "") -> None:
-    _job_progress[job_id] = {"step": step, "total": total, "label": label, "done": done, "error": error}
+    now = time.time()
+    existing = _job_progress.get(job_id, {})
+    _job_progress[job_id] = {
+        "step": step,
+        "total": total,
+        "label": label,
+        "done": done,
+        "error": error,
+        "last_heartbeat": now,
+        "started_at": existing.get("started_at", now),
+    }
 
 
 
@@ -186,6 +199,11 @@ class RenderExtendedResult(BaseModel):
     renderEngine: Literal["deterministic-sidecar-v1"]
 
 
+class RenderStartResult(BaseModel):
+    jobId: str
+    status: Literal["started"]
+
+
 class TransformPreviewResult(BaseModel):
     jobId: str
     outputDirectory: str
@@ -260,23 +278,45 @@ app.add_middleware(
 
 @app.get("/progress/{job_id}")
 async def get_progress(job_id: str):
-    """SSE stream: emituje zdarzenia postępu dla danego job_id.
-    Klient łączy się i dostaje aktualizacje co 300ms, aż do done/error.
-    """
-    async def event_stream():
-        for _ in range(600):  # max 3 minuty @ 300ms
-            data = _job_progress.get(job_id)
-            if data:
-                import json as _json
-                yield f"data: {_json.dumps(data)}\n\n"
-                if data.get("done") or data.get("error"):
-                    break
-            else:
-                yield f"data: {{}}\n\n"
-            await asyncio.sleep(0.3)
+    """Zwraca aktualny stan postępu dla danego job_id jako JSON.
+    Frontend polluje co 2-3 sekundy. Endpoint jest lekki i non-blocking."""
+    data = _job_progress.get(job_id)
+    if data is None:
+        return {"step": 0, "total": 0, "label": "Waiting...", "done": False, "error": "",
+                "last_heartbeat": None, "started_at": None, "elapsed_seconds": 0, "eta_seconds": None}
+    now = time.time()
+    started_at = data.get("started_at") or now
+    elapsed = now - started_at
+    step = data.get("step", 0)
+    total = data.get("total", 1)
+    eta = None
+    if step > 0 and total > 0 and elapsed > 0:
+        rate = step / elapsed
+        remaining = total - step
+        if rate > 0:
+            eta = remaining / rate
+    return {
+        **data,
+        "elapsed_seconds": round(elapsed, 1),
+        "eta_seconds": round(eta, 0) if eta is not None else None,
+    }
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+@app.get("/render_result/{job_id}")
+async def get_render_result(job_id: str):
+    """Zwraca wynik render job gdy done=True, lub 202 gdy jeszcze trwa."""
+    progress = _job_progress.get(job_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if progress.get("error"):
+        raise HTTPException(status_code=500, detail=progress["error"])
+    if not progress.get("done"):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=202, content={"status": "pending", "jobId": job_id})
+    result = _job_results.get(job_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Job done but result not stored")
+    return result
 
 
 
@@ -1598,11 +1638,11 @@ async def separate(file: UploadFile = File(...)) -> StemSeparationResult:
     )
 
 
-@app.post("/render_extended", response_model=RenderExtendedResult)
+@app.post("/render_extended", response_model=RenderStartResult, status_code=202)
 async def render_extended(
     file: UploadFile = File(...),
     metadata: str = Form(...),
-) -> RenderExtendedResult:
+) -> RenderStartResult:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing source filename")
 
@@ -1611,312 +1651,386 @@ async def render_extended(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {exc}") from exc
 
-    stem_output = payload.get("stemPackage", {}).get("outputDirectory")
-    plan = payload.get("plan", {})
-    request = payload.get("request", {})
-    takes_payload = plan.get("takes", [])
-
-    # Optional per-request token coming from app settings (BYOK workflow).
-    request_hf_token = str(request.get("huggingfaceToken") or "").strip()
-    if request_hf_token:
-        os.environ["HUGGINGFACE_TOKEN"] = request_hf_token
-
-    if not stem_output:
-        raise HTTPException(status_code=400, detail="Missing stem package output directory")
-
-    stem_dir = Path(stem_output)
-    if not stem_dir.exists():
-        raise HTTPException(status_code=400, detail="Stem package directory does not exist")
-
     raw_source = await file.read()
     if not raw_source:
         raise HTTPException(status_code=400, detail="Empty source audio")
 
-    try:
-        source_audio, source_sr = sf.read(io.BytesIO(raw_source), always_2d=True)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Cannot decode source audio: {exc}") from exc
-
-    source_audio = _ensure_stereo(source_audio.astype(np.float32))
-
-    def load_stem(name: str) -> np.ndarray:
-        path = stem_dir / f"{name}.wav"
-        if not path.exists():
-            raise HTTPException(status_code=400, detail=f"Missing stem file: {path}")
-        audio, sr = sf.read(path, always_2d=True)
-        audio = _ensure_stereo(audio.astype(np.float32))
-        return _resample_stereo(audio, sr, source_sr)
-
-    drums = load_stem("drums")
-    bass = load_stem("bass")
-    other = load_stem("other")
-    vocals = load_stem("vocals")
-
-    bpm = float(request.get("bpm") or 120.0)
-    intro_bars = int(plan.get("quantizedIntroBars") or 0)
-    outro_bars = int(plan.get("quantizedOutroBars") or 0)
-    operation_mode = str(request.get("operationMode") or "intro_outro")
-    vocal_policy = str(request.get("vocalHandling") or "no_vocals")
-
-    _render_logger = logging.getLogger("djextender.render")
-    _render_logger.info(
-        "[render_extended] bpm=%.2f intro_bars=%d outro_bars=%d operation_mode=%s "
-        "source_shape=%s source_sr=%d drums=%s bass=%s other=%s vocals=%s",
-        bpm, intro_bars, outro_bars, operation_mode,
-        source_audio.shape, source_sr,
-        drums.shape, bass.shape, other.shape, vocals.shape,
-    )
-
-    bars_to_samples = lambda bars: int(round((240.0 / max(bpm, 1.0)) * bars * source_sr))
-    intro_samples = bars_to_samples(intro_bars)
-    outro_samples = bars_to_samples(outro_bars)
-
-    include_vocal_hook = vocal_policy == "keep_short_hook"
-    target_sample_rate = 44100
-    time_stretch_ratio = float(request.get("timeStretchRatio") or 1.0)
-    pitch_semitones = float(request.get("pitchSemitones") or 0.0)
-    style_preset = str(request.get("stylePreset") or "close_to_original")
-
-    raw_ai_flag = request.get("useAiGeneratedIntroOutro", False)
-    use_ai_intro_outro = (
-        raw_ai_flag.lower() in ("1", "true", "yes", "on")
-        if isinstance(raw_ai_flag, str)
-        else bool(raw_ai_flag)
-    )
-
-    # Downbeat offset — ustawiamy loop na beat-1 zamiast na próbkę 0
-    downbeat_offset_sec = float(request.get("downbeatOffsetSeconds") or 0.0)
-    downbeat_offset_samples = int(round(downbeat_offset_sec * source_sr))
-
-    # Align source start to detected downbeat for seamless intro entry.
-    source_aligned = source_audio
-    if operation_mode in ("intro", "intro_outro") and 0 < downbeat_offset_samples < source_audio.shape[0]:
-        source_aligned = np.concatenate(
-            [source_audio[downbeat_offset_samples:], source_audio[:downbeat_offset_samples]],
-            axis=0,
-        ).astype(np.float32)
-
     render_job = uuid4().hex[:12]
-    output_dir = Path.cwd() / "runs" / "renders" / render_job
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _set_progress(render_job, 0, 1, "Queued...", done=False)
 
-    warnings: list[str] = []
-    rendered_takes: list[RenderedTake] = []
-    ffmpeg_bin = _ffmpeg_path()
-    rubberband_bin = _rubberband_path()
-    if ffmpeg_bin is None:
-        warnings.append("FFmpeg not found in PATH. MP3 and AIFF exports will fallback to WAV copies.")
-    if (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4) and rubberband_bin is None:
-        raise HTTPException(status_code=500, detail="Rubber Band CLI not found in PATH (expected command: rubberband)")
-
-    take_count = len(takes_payload) if takes_payload else int(request.get("takeCount") or 1)
-    take_count = max(1, min(5, take_count))
-
-    wants_intro = operation_mode in ("intro", "intro_outro") and intro_samples > 0
-    wants_outro = operation_mode in ("outro", "intro_outro") and outro_samples > 0
-    ai_intro_step = use_ai_intro_outro and wants_intro
-    ai_outro_step = use_ai_intro_outro and wants_outro
-    ai_steps = int(ai_intro_step) + int(ai_outro_step)
-
-    render_start_step = 2 + ai_steps
-    total_steps = render_start_step + take_count
-    _set_progress(render_job, 0, total_steps, "Preparing stems...")
-
-    _set_progress(render_job, 1, total_steps, "Building intro...")
-    intro = (
-        _build_intro(drums, bass, other, vocals, intro_samples, include_vocal_hook, downbeat_offset_samples, sr=source_sr)
-        if wants_intro
-        else np.zeros((0, 2), dtype=np.float32)
-    )
-    _set_progress(render_job, 2, total_steps, "Building outro...")
-    outro = (
-        _build_outro(drums, bass, other, vocals, outro_samples, include_vocal_hook, downbeat_offset_samples, sr=source_sr)
-        if wants_outro
-        else np.zeros((0, 2), dtype=np.float32)
+    # Uruchamiamy ciężki render w osobnym wątku — event loop pozostaje wolny
+    asyncio.get_event_loop().run_in_executor(
+        None, _run_render_extended_blocking, render_job, raw_source, payload
     )
 
-    # Optional AI layers (local Stable Audio model) mixed into intro/outro.
-    step_cursor = 2
-    if use_ai_intro_outro:
-        key_label = str(request.get("musicalKey") or "A minor")
-        camelot_label = str(request.get("camelotKey") or "")
-        ai_dir = output_dir / "ai_layers"
-        ai_dir.mkdir(parents=True, exist_ok=True)
+    return RenderStartResult(jobId=render_job, status="started")
 
-        if ai_intro_step:
-            step_cursor += 1
-            _set_progress(render_job, step_cursor, total_steps, "Generating AI intro layer (Stable Audio)...")
-            intro_duration_s = max(4.0, min(30.0, intro_samples / max(source_sr, 1)))
-            intro_prompt = _build_ai_prompt(
-                operation="intro",
-                bpm=bpm,
-                musical_key=key_label,
-                camelot_key=camelot_label,
-                style_preset=style_preset,
-                duration_s=intro_duration_s,
-            )
-            logger.info("AI intro prompt: %s", intro_prompt)
-            try:
-                intro_ai_path = ai_dir / "intro_ai.wav"
-                ai_sr, _, ai_warnings = _generate_stable_to_file(
-                    prompt_text=intro_prompt,
-                    clip_duration_seconds=intro_duration_s,
-                    destination_path=intro_ai_path,
-                )
-                warnings.extend(ai_warnings)
-                ai_intro, _ = sf.read(intro_ai_path, always_2d=True)
-                ai_intro = _ensure_stereo(ai_intro.astype(np.float32))
-                ai_intro = _resample_stereo(ai_intro, ai_sr, source_sr)
-                ai_intro = _loop_to_length(ai_intro, intro.shape[0], 0)
-                intro = _safe_mix(intro * 0.70 + ai_intro * 0.30)
-            except Exception as exc:
-                warnings.append(f"AI intro generation unavailable, fallback to deterministic intro: {exc}")
 
-        if ai_outro_step:
-            step_cursor += 1
-            _set_progress(render_job, step_cursor, total_steps, "Generating AI outro layer (Stable Audio)...")
-            outro_duration_s = max(4.0, min(30.0, outro_samples / max(source_sr, 1)))
-            outro_prompt = _build_ai_prompt(
-                operation="outro",
-                bpm=bpm,
-                musical_key=key_label,
-                camelot_key=camelot_label,
-                style_preset=style_preset,
-                duration_s=outro_duration_s,
-            )
-            logger.info("AI outro prompt: %s", outro_prompt)
-            try:
-                outro_ai_path = ai_dir / "outro_ai.wav"
-                ai_sr, _, ai_warnings = _generate_stable_to_file(
-                    prompt_text=outro_prompt,
-                    clip_duration_seconds=outro_duration_s,
-                    destination_path=outro_ai_path,
-                )
-                warnings.extend(ai_warnings)
-                ai_outro, _ = sf.read(outro_ai_path, always_2d=True)
-                ai_outro = _ensure_stereo(ai_outro.astype(np.float32))
-                ai_outro = _resample_stereo(ai_outro, ai_sr, source_sr)
-                ai_outro = _loop_to_length(ai_outro, outro.shape[0], 0)
-                outro = _safe_mix(outro * 0.72 + ai_outro * 0.28)
-            except Exception as exc:
-                warnings.append(f"AI outro generation unavailable, fallback to deterministic outro: {exc}")
+# ---------------------------------------------------------------------------
+# Synchroniczna funkcja wykonywana w osobnym wątku (asyncio executor).
+# NIE może używać `await` ani FastAPI HTTP exceptions — zgłasza wyjątki Python.
+# ---------------------------------------------------------------------------
+_AI_STAGE_TIMEOUT_SECONDS = 180  # watchdog: maks. czas na jeden etap AI
 
-    # Crossfade intro→source i source→outro (beat-synced, up to 1 bar).
-    # Previous short crossfade (~0.5s) could leave audible boundary clicks on some tracks.
-    bar_samples = bars_to_samples(1)
-    cf_samples = max(2048, min(bar_samples, int(source_sr * 1.5)))
 
-    for take_index in range(take_count):
-        _set_progress(render_job, render_start_step + take_index + 1, total_steps, f"Rendering take {take_index + 1}/{take_count}...")
-        take_payload = takes_payload[take_index] if take_index < len(takes_payload) else {}
-        take_label = str(take_payload.get("label") or f"Take {take_index + 1}")
-        variation_focus = str(take_payload.get("variationFocus") or "")
-        intro_mix, source_mix, outro_mix = _apply_take_variant(
-            take_index=take_index,
-            take_label=f"{take_label} {variation_focus}",
-            intro=intro,
-            source_mix=source_aligned,
-            outro=outro,
-            sr=source_sr,
-        )
+def _generate_stable_with_watchdog(
+    prompt_text: str,
+    clip_duration_seconds: float,
+    destination_path: "Path",
+    job_id: str,
+    step_label: str,
+) -> tuple[int, float, list[str]]:
+    """Wrapper wywołujący `_generate_stable_to_file` z watchdogiem.
+    Jeśli operacja przekroczy _AI_STAGE_TIMEOUT_SECONDS → podnosi TimeoutError."""
+    result_box: list = []
+    exc_box: list = []
 
-        # Składamy z crossfade na złączach intro→source i source→outro
-        if intro_mix.shape[0] > 0 and source_mix.shape[0] > 0:
-            combined = _crossfade(intro_mix, source_mix, cf_samples)
-        else:
-            combined = np.concatenate([intro_mix, source_mix], axis=0)
+    def _target():
+        try:
+            result_box.append(_generate_stable_to_file(
+                prompt_text=prompt_text,
+                clip_duration_seconds=clip_duration_seconds,
+                destination_path=destination_path,
+            ))
+        except Exception as e:
+            exc_box.append(e)
 
-        if outro_mix.shape[0] > 0 and combined.shape[0] > 0:
-            rendered = _crossfade(combined, outro_mix, cf_samples)
-        else:
-            rendered = np.concatenate([combined, outro_mix], axis=0)
-        rendered = _safe_mix(rendered)
-        # Normalizacja RMS do -14 dBFS (standard streamingowy / DJ)
-        rendered = _normalize_to_rms(rendered, target_rms_db=-14.0)
-        rendered = _resample_stereo(rendered, source_sr, target_sample_rate)
+    t = threading.Thread(target=_target, daemon=True)
+    deadline = time.time() + _AI_STAGE_TIMEOUT_SECONDS
+    t.start()
+    # Poll co 5s, aktualizuj heartbeat żeby frontend widział aktywność
+    while t.is_alive():
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            # Wątek AI nadal żyje po timeoucie — oznaczamy jako błąd w progress
+            _set_progress(job_id, -1, 1, f"TIMEOUT: {step_label} (>{_AI_STAGE_TIMEOUT_SECONDS}s)", error=f"AI stage timeout: {step_label}")
+            raise TimeoutError(f"AI stage '{step_label}' exceeded {_AI_STAGE_TIMEOUT_SECONDS}s watchdog limit")
+        t.join(timeout=5.0)
+        # Odśwież heartbeat żeby pokazać że jesteśmy aktywni
+        entry = _job_progress.get(job_id)
+        if entry:
+            _job_progress[job_id] = {**entry, "last_heartbeat": time.time()}
+
+    if exc_box:
+        raise exc_box[0]
+    return result_box[0]
+
+
+def _run_render_extended_blocking(render_job: str, raw_source: bytes, payload: dict) -> None:
+    """Blokująca funkcja renderowania — uruchamiana w asyncio.to_thread / executor."""
+    _render_logger = logging.getLogger("djextender.render")
+    try:
+        stem_output = payload.get("stemPackage", {}).get("outputDirectory")
+        plan = payload.get("plan", {})
+        request = payload.get("request", {})
+        takes_payload = plan.get("takes", [])
+
+        request_hf_token = str(request.get("huggingfaceToken") or "").strip()
+        if request_hf_token:
+            os.environ["HUGGINGFACE_TOKEN"] = request_hf_token
+
+        if not stem_output:
+            _set_progress(render_job, -1, 1, "Error: missing stem package directory", error="Missing stem package output directory")
+            return
+
+        stem_dir = Path(stem_output)
+        if not stem_dir.exists():
+            _set_progress(render_job, -1, 1, "Error: stem directory does not exist", error=f"Stem dir not found: {stem_dir}")
+            return
+
+        try:
+            source_audio, source_sr = sf.read(io.BytesIO(raw_source), always_2d=True)
+        except Exception as exc:
+            _set_progress(render_job, -1, 1, f"Error: cannot decode audio: {exc}", error=str(exc))
+            return
+
+        source_audio = _ensure_stereo(source_audio.astype(np.float32))
+
+        def load_stem(name: str) -> np.ndarray:
+            path = stem_dir / f"{name}.wav"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing stem file: {path}")
+            audio, sr = sf.read(path, always_2d=True)
+            audio = _ensure_stereo(audio.astype(np.float32))
+            return _resample_stereo(audio, sr, source_sr)
+
+        try:
+            drums = load_stem("drums")
+            bass = load_stem("bass")
+            other = load_stem("other")
+            vocals = load_stem("vocals")
+        except FileNotFoundError as exc:
+            _set_progress(render_job, -1, 1, f"Error: {exc}", error=str(exc))
+            return
+
+        bpm = float(request.get("bpm") or 120.0)
+        intro_bars = int(plan.get("quantizedIntroBars") or 0)
+        outro_bars = int(plan.get("quantizedOutroBars") or 0)
+        operation_mode = str(request.get("operationMode") or "intro_outro")
+        vocal_policy = str(request.get("vocalHandling") or "no_vocals")
 
         _render_logger.info(
-            "[render_extended] take=%d intro_shape=%s source_shape=%s outro_shape=%s rendered_shape=%s (%.2fs)",
-            take_index + 1, intro_mix.shape, source_mix.shape, outro_mix.shape,
-            rendered.shape, rendered.shape[0] / target_sample_rate,
+            "[render_extended] bpm=%.2f intro_bars=%d outro_bars=%d operation_mode=%s "
+            "source_shape=%s source_sr=%d drums=%s bass=%s other=%s vocals=%s",
+            bpm, intro_bars, outro_bars, operation_mode,
+            source_audio.shape, source_sr,
+            drums.shape, bass.shape, other.shape, vocals.shape,
         )
 
-        wav_path = output_dir / f"take_{take_index + 1}.wav"
-        mp3_path = output_dir / f"take_{take_index + 1}.mp3"
-        aiff_path = output_dir / f"take_{take_index + 1}.aiff"
+        bars_to_samples = lambda bars: int(round((240.0 / max(bpm, 1.0)) * bars * source_sr))
+        intro_samples = bars_to_samples(intro_bars)
+        outro_samples = bars_to_samples(outro_bars)
 
-        sf.write(wav_path, rendered, target_sample_rate, subtype="PCM_24")
+        include_vocal_hook = vocal_policy == "keep_short_hook"
+        target_sample_rate = 44100
+        time_stretch_ratio = float(request.get("timeStretchRatio") or 1.0)
+        pitch_semitones = float(request.get("pitchSemitones") or 0.0)
+        style_preset = str(request.get("stylePreset") or "close_to_original")
 
-        master_wav_path = wav_path
-        if rubberband_bin is not None and (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4):
-            processed_path = output_dir / f"take_{take_index + 1}_post.wav"
-            post_ok, post_error = _apply_rubberband_with_cli(
-                rubberband_bin=rubberband_bin,
-                input_path=wav_path,
-                output_path=processed_path,
-                target_sample_rate=target_sample_rate,
-                time_stretch_ratio=time_stretch_ratio,
-                pitch_semitones=pitch_semitones,
+        raw_ai_flag = request.get("useAiGeneratedIntroOutro", False)
+        use_ai_intro_outro = (
+            raw_ai_flag.lower() in ("1", "true", "yes", "on")
+            if isinstance(raw_ai_flag, str)
+            else bool(raw_ai_flag)
+        )
+
+        downbeat_offset_sec = float(request.get("downbeatOffsetSeconds") or 0.0)
+        downbeat_offset_samples = int(round(downbeat_offset_sec * source_sr))
+
+        source_aligned = source_audio
+        if operation_mode in ("intro", "intro_outro") and 0 < downbeat_offset_samples < source_audio.shape[0]:
+            source_aligned = np.concatenate(
+                [source_audio[downbeat_offset_samples:], source_audio[:downbeat_offset_samples]],
+                axis=0,
+            ).astype(np.float32)
+
+        output_dir = Path.cwd() / "runs" / "renders" / render_job
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        warnings: list[str] = []
+        rendered_takes: list[RenderedTake] = []
+        ffmpeg_bin = _ffmpeg_path()
+        rubberband_bin = _rubberband_path()
+        if ffmpeg_bin is None:
+            warnings.append("FFmpeg not found in PATH. MP3 and AIFF exports will fallback to WAV copies.")
+        if (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4) and rubberband_bin is None:
+            _set_progress(render_job, -1, 1, "Error: Rubber Band CLI not found", error="Rubber Band CLI not found in PATH")
+            return
+
+        take_count = len(takes_payload) if takes_payload else int(request.get("takeCount") or 1)
+        take_count = max(1, min(5, take_count))
+
+        wants_intro = operation_mode in ("intro", "intro_outro") and intro_samples > 0
+        wants_outro = operation_mode in ("outro", "intro_outro") and outro_samples > 0
+        ai_intro_step = use_ai_intro_outro and wants_intro
+        ai_outro_step = use_ai_intro_outro and wants_outro
+        ai_steps = int(ai_intro_step) + int(ai_outro_step)
+
+        render_start_step = 2 + ai_steps
+        total_steps = render_start_step + take_count
+        _set_progress(render_job, 0, total_steps, "Preparing stems...")
+
+        _set_progress(render_job, 1, total_steps, "Building intro...")
+        intro = (
+            _build_intro(drums, bass, other, vocals, intro_samples, include_vocal_hook, downbeat_offset_samples, sr=source_sr)
+            if wants_intro
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+        _set_progress(render_job, 2, total_steps, "Building outro...")
+        outro = (
+            _build_outro(drums, bass, other, vocals, outro_samples, include_vocal_hook, downbeat_offset_samples, sr=source_sr)
+            if wants_outro
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+
+        step_cursor = 2
+        if use_ai_intro_outro:
+            key_label = str(request.get("musicalKey") or "A minor")
+            camelot_label = str(request.get("camelotKey") or "")
+            ai_dir = output_dir / "ai_layers"
+            ai_dir.mkdir(parents=True, exist_ok=True)
+
+            if ai_intro_step:
+                step_cursor += 1
+                _set_progress(render_job, step_cursor, total_steps, f"Generating AI intro layer (Stable Audio, max {_AI_STAGE_TIMEOUT_SECONDS}s)...")
+                intro_duration_s = max(4.0, min(30.0, intro_samples / max(source_sr, 1)))
+                intro_prompt = _build_ai_prompt(
+                    operation="intro",
+                    bpm=bpm,
+                    musical_key=key_label,
+                    camelot_key=camelot_label,
+                    style_preset=style_preset,
+                    duration_s=intro_duration_s,
+                )
+                logger.info("AI intro prompt: %s", intro_prompt)
+                try:
+                    intro_ai_path = ai_dir / "intro_ai.wav"
+                    ai_sr, _, ai_warnings = _generate_stable_with_watchdog(
+                        prompt_text=intro_prompt,
+                        clip_duration_seconds=intro_duration_s,
+                        destination_path=intro_ai_path,
+                        job_id=render_job,
+                        step_label="AI intro",
+                    )
+                    warnings.extend(ai_warnings)
+                    ai_intro, _ = sf.read(intro_ai_path, always_2d=True)
+                    ai_intro = _ensure_stereo(ai_intro.astype(np.float32))
+                    ai_intro = _resample_stereo(ai_intro, ai_sr, source_sr)
+                    ai_intro = _loop_to_length(ai_intro, intro.shape[0], 0)
+                    intro = _safe_mix(intro * 0.70 + ai_intro * 0.30)
+                except (TimeoutError, Exception) as exc:
+                    warnings.append(f"AI intro generation unavailable, fallback to deterministic intro: {exc}")
+                    # Reset progress label after watchdog clears it
+                    _set_progress(render_job, step_cursor, total_steps, "Fallback: using deterministic intro (AI timed out)")
+
+            if ai_outro_step:
+                step_cursor += 1
+                _set_progress(render_job, step_cursor, total_steps, f"Generating AI outro layer (Stable Audio, max {_AI_STAGE_TIMEOUT_SECONDS}s)...")
+                outro_duration_s = max(4.0, min(30.0, outro_samples / max(source_sr, 1)))
+                outro_prompt = _build_ai_prompt(
+                    operation="outro",
+                    bpm=bpm,
+                    musical_key=key_label,
+                    camelot_key=camelot_label,
+                    style_preset=style_preset,
+                    duration_s=outro_duration_s,
+                )
+                logger.info("AI outro prompt: %s", outro_prompt)
+                try:
+                    outro_ai_path = ai_dir / "outro_ai.wav"
+                    ai_sr, _, ai_warnings = _generate_stable_with_watchdog(
+                        prompt_text=outro_prompt,
+                        clip_duration_seconds=outro_duration_s,
+                        destination_path=outro_ai_path,
+                        job_id=render_job,
+                        step_label="AI outro",
+                    )
+                    warnings.extend(ai_warnings)
+                    ai_outro, _ = sf.read(outro_ai_path, always_2d=True)
+                    ai_outro = _ensure_stereo(ai_outro.astype(np.float32))
+                    ai_outro = _resample_stereo(ai_outro, ai_sr, source_sr)
+                    ai_outro = _loop_to_length(ai_outro, outro.shape[0], 0)
+                    outro = _safe_mix(outro * 0.72 + ai_outro * 0.28)
+                except (TimeoutError, Exception) as exc:
+                    warnings.append(f"AI outro generation unavailable, fallback to deterministic outro: {exc}")
+                    _set_progress(render_job, step_cursor, total_steps, "Fallback: using deterministic outro (AI timed out)")
+
+        bar_samples = bars_to_samples(1)
+        cf_samples = max(2048, min(bar_samples, int(source_sr * 1.5)))
+
+        for take_index in range(take_count):
+            _set_progress(render_job, render_start_step + take_index + 1, total_steps, f"Rendering take {take_index + 1}/{take_count}...")
+            take_payload = takes_payload[take_index] if take_index < len(takes_payload) else {}
+            take_label = str(take_payload.get("label") or f"Take {take_index + 1}")
+            variation_focus = str(take_payload.get("variationFocus") or "")
+            intro_mix, source_mix, outro_mix = _apply_take_variant(
+                take_index=take_index,
+                take_label=f"{take_label} {variation_focus}",
+                intro=intro,
+                source_mix=source_aligned,
+                outro=outro,
+                sr=source_sr,
             )
-            if post_ok:
-                master_wav_path = processed_path
-                wav_path.unlink(missing_ok=True)
-                master_wav_path.replace(wav_path)
+
+            if intro_mix.shape[0] > 0 and source_mix.shape[0] > 0:
+                combined = _crossfade(intro_mix, source_mix, cf_samples)
             else:
-                warnings.append(post_error or f"Rubber Band post failed for take {take_index + 1}")
+                combined = np.concatenate([intro_mix, source_mix], axis=0)
 
-        if ffmpeg_bin is not None:
-            mp3_ok, mp3_error = _convert_with_ffmpeg(
-                ffmpeg_bin,
-                wav_path,
-                mp3_path,
-                ["-codec:a", "libmp3lame", "-b:a", "320k", "-ar", str(target_sample_rate)],
+            if outro_mix.shape[0] > 0 and combined.shape[0] > 0:
+                rendered = _crossfade(combined, outro_mix, cf_samples)
+            else:
+                rendered = np.concatenate([combined, outro_mix], axis=0)
+            rendered = _safe_mix(rendered)
+            rendered = _normalize_to_rms(rendered, target_rms_db=-14.0)
+            rendered = _resample_stereo(rendered, source_sr, target_sample_rate)
+
+            _render_logger.info(
+                "[render_extended] take=%d intro_shape=%s source_shape=%s outro_shape=%s rendered_shape=%s (%.2fs)",
+                take_index + 1, intro_mix.shape, source_mix.shape, outro_mix.shape,
+                rendered.shape, rendered.shape[0] / target_sample_rate,
             )
-            if not mp3_ok:
-                warnings.append(mp3_error or f"MP3 conversion failed for take {take_index + 1}")
+
+            wav_path = output_dir / f"take_{take_index + 1}.wav"
+            mp3_path = output_dir / f"take_{take_index + 1}.mp3"
+            aiff_path = output_dir / f"take_{take_index + 1}.aiff"
+
+            sf.write(wav_path, rendered, target_sample_rate, subtype="PCM_24")
+
+            master_wav_path = wav_path
+            if rubberband_bin is not None and (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4):
+                processed_path = output_dir / f"take_{take_index + 1}_post.wav"
+                post_ok, post_error = _apply_rubberband_with_cli(
+                    rubberband_bin=rubberband_bin,
+                    input_path=wav_path,
+                    output_path=processed_path,
+                    target_sample_rate=target_sample_rate,
+                    time_stretch_ratio=time_stretch_ratio,
+                    pitch_semitones=pitch_semitones,
+                )
+                if post_ok:
+                    master_wav_path = processed_path
+                    wav_path.unlink(missing_ok=True)
+                    master_wav_path.replace(wav_path)
+                else:
+                    warnings.append(post_error or f"Rubber Band post failed for take {take_index + 1}")
+
+            if ffmpeg_bin is not None:
+                mp3_ok, mp3_error = _convert_with_ffmpeg(
+                    ffmpeg_bin,
+                    wav_path,
+                    mp3_path,
+                    ["-codec:a", "libmp3lame", "-b:a", "320k", "-ar", str(target_sample_rate)],
+                )
+                if not mp3_ok:
+                    warnings.append(mp3_error or f"MP3 conversion failed for take {take_index + 1}")
+                    shutil.copy2(wav_path, mp3_path)
+
+                aiff_ok, aiff_error = _convert_with_ffmpeg(
+                    ffmpeg_bin,
+                    wav_path,
+                    aiff_path,
+                    ["-c:a", "pcm_s24be", "-ar", str(target_sample_rate)],
+                )
+                if not aiff_ok:
+                    warnings.append(aiff_error or f"AIFF conversion failed for take {take_index + 1}")
+                    shutil.copy2(wav_path, aiff_path)
+            else:
                 shutil.copy2(wav_path, mp3_path)
-
-            aiff_ok, aiff_error = _convert_with_ffmpeg(
-                ffmpeg_bin,
-                wav_path,
-                aiff_path,
-                ["-c:a", "pcm_s24be", "-ar", str(target_sample_rate)],
-            )
-            if not aiff_ok:
-                warnings.append(aiff_error or f"AIFF conversion failed for take {take_index + 1}")
                 shutil.copy2(wav_path, aiff_path)
-        else:
-            shutil.copy2(wav_path, mp3_path)
-            shutil.copy2(wav_path, aiff_path)
 
-        rendered_takes.append(
-            RenderedTake(
-                takeIndex=take_index + 1,
-                label=take_label,
-                outputPath=str(wav_path),
-                wavPath=str(wav_path),
-                mp3Path=str(mp3_path),
-                aiffPath=str(aiff_path),
-                durationSeconds=float(rendered.shape[0] / target_sample_rate),
-                sampleRate=int(target_sample_rate),
+            rendered_takes.append(
+                RenderedTake(
+                    takeIndex=take_index + 1,
+                    label=take_label,
+                    outputPath=str(wav_path),
+                    wavPath=str(wav_path),
+                    mp3Path=str(mp3_path),
+                    aiffPath=str(aiff_path),
+                    durationSeconds=float(rendered.shape[0] / target_sample_rate),
+                    sampleRate=int(target_sample_rate),
+                )
             )
+
+        if take_count < 3:
+            warnings.append("Professional workflow expects 3 takes; current render produced fewer variants.")
+
+        result = RenderExtendedResult(
+            jobId=render_job,
+            outputDirectory=str(output_dir),
+            takes=rendered_takes,
+            warnings=warnings,
+            renderEngine="deterministic-sidecar-v1",
         )
+        # Zapisujemy wynik do cache — frontend pobierze via /render_result/{jobId}
+        _job_results[render_job] = result.model_dump()
+        _set_progress(render_job, total_steps, total_steps, "Done", done=True)
 
-    if take_count < 3:
-        warnings.append("Professional workflow expects 3 takes; current render produced fewer variants.")
-
-    _set_progress(render_job, total_steps, total_steps, "Done", done=True)
-
-    return RenderExtendedResult(
-        jobId=render_job,
-        outputDirectory=str(output_dir),
-        takes=rendered_takes,
-        warnings=warnings,
-        renderEngine="deterministic-sidecar-v1",
-    )
+    except Exception as exc:
+        _render_logger.exception("[render_extended] Unhandled error in background render job %s", render_job)
+        _set_progress(render_job, -1, 1, f"Error: {exc}", error=str(exc))
 
 
-@app.post("/qa_render", response_model=QARenderResult)
 async def qa_render(
     wav_path: str = Form(...),
     expected_bpm: float = Form(...),

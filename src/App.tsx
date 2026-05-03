@@ -4,7 +4,7 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { type AudioAnalysisResult } from "./audioAnalyzer";
 import { analyzeWithProSidecar } from "./proAnalysisClient";
 import { separateWithProSidecar } from "./proStemClient";
-import { renderExtendedWithProSidecar, type RenderExtendedResult } from "./proRenderClient";
+import { renderExtendedWithProSidecar, type RenderExtendedResult, type RenderProgress } from "./proRenderClient";
 import {
   transformAudioWithProSidecar,
   transformPreviewWithProSidecar,
@@ -254,7 +254,9 @@ function App() {
   const [selectedTake, setSelectedTake] = useState(0);
   const [qaResults, setQaResults] = useState<QARenderResult[]>([]);
   const [isQARunning, setIsQARunning] = useState(false);
-  const [sseProgress, setSseProgress] = useState<{step: number; total: number; label: string} | null>(null);
+  const [sseProgress, setSseProgress] = useState<{step: number; total: number; label: string; elapsed_seconds?: number; eta_seconds?: number | null; last_heartbeat?: number | null} | null>(null);
+  const [renderStaleWarning, setRenderStaleWarning] = useState<string | null>(null);
+  const renderAbortRef = useRef<AbortController | null>(null);
 
   // Stem player state
   const [stemPackageResult, setStemPackageResult] = useState<{jobId: string; outputDirectory: string; stems: Array<{stem: string; path: string}>} | null>(null);
@@ -590,6 +592,7 @@ function App() {
     setRenderResult(null);
     setTransformResult(null);
     setSseProgress(null);
+    setRenderStaleWarning(null);
     setStep(4);
 
     try {
@@ -652,43 +655,40 @@ function App() {
       const plan = await invoke<PlanResponse>("build_extension_plan", { request: planRequest });
 
       setGenerateStage("Renderuję extended mix...");
-      const renderSteps = aiIntroOutroMode === "ai_assisted"
-        ? [
-            "Buduję aranżację perkusja+bas...",
-            ...(operationMode !== "outro" ? ["Generuję AI intro (Stable Audio)..."] : []),
-            ...(operationMode !== "intro" ? ["Generuję AI outro (Stable Audio)..."] : []),
-            "Składam take 1/3...",
-            "Składam take 2/3...",
-            "Składam take 3/3...",
-            "Normalizuję i eksportuję WAV...",
-          ]
-        : [
-            "Buduję aranżację intro...",
-            "Stosuję automatyzację filtru LP...",
-            "Buduję breakdown outro...",
-            "Składam take 1/3...",
-            "Składam take 2/3...",
-            "Składam take 3/3...",
-            "Normalizuję i eksportuję WAV...",
-          ];
-      let renderStepIdx = 0;
-      setSseProgress({step: 0, total: renderSteps.length, label: renderSteps[0]});
-      const renderTimer = setInterval(() => {
-        renderStepIdx = Math.min(renderStepIdx + 1, renderSteps.length - 1);
-        setSseProgress({step: renderStepIdx, total: renderSteps.length, label: renderSteps[renderStepIdx]});
-      }, 4000);
+      setRenderStaleWarning(null);
+      const abortCtrl = new AbortController();
+      renderAbortRef.current = abortCtrl;
 
-      // Uruchom SSE progress — job_id poznamy z odpowiedzi, ale możemy otworzyć po starcie
-      const renderPromise = renderExtendedWithProSidecar({
+      const STALE_THRESHOLD_S = 30;
+
+      const result = await renderExtendedWithProSidecar({
         sourceFile: selectedFile,
         request: planRequest as unknown as Record<string, unknown>,
         plan,
         stemPackage,
+        signal: abortCtrl.signal,
+        onProgress: (p: RenderProgress) => {
+          setSseProgress({
+            step: p.step,
+            total: p.total,
+            label: p.label,
+            elapsed_seconds: p.elapsed_seconds,
+            eta_seconds: p.eta_seconds,
+            last_heartbeat: p.last_heartbeat,
+          });
+          // Stale detector: heartbeat starszy niż STALE_THRESHOLD_S sekund
+          if (p.last_heartbeat !== null && p.last_heartbeat !== undefined) {
+            const age = Date.now() / 1000 - p.last_heartbeat;
+            if (age > STALE_THRESHOLD_S && !p.done) {
+              setRenderStaleWarning(`Render może wisieć — ostatnia aktywność: ${Math.round(age)}s temu`);
+            } else {
+              setRenderStaleWarning(null);
+            }
+          }
+        },
       });
-
-      const result = await renderPromise;
-      clearInterval(renderTimer);
-      setSseProgress({step: renderSteps.length, total: renderSteps.length, label: "Render zakończony ✓"});
+      renderAbortRef.current = null;
+      setSseProgress({step: 1, total: 1, label: "Render zakończony ✓"});
 
       setRenderResult(result);
       setGenerateStage("");
@@ -1596,6 +1596,27 @@ function App() {
                       style={{width: `${Math.round((sseProgress.step / sseProgress.total) * 100)}%`}}
                     />
                     <span className="progress-bar-pct">{Math.round((sseProgress.step / sseProgress.total) * 100)}%</span>
+                  </div>
+                )}
+
+                {sseProgress?.elapsed_seconds != null && (
+                  <p className="generate-timing">
+                    Czas: {Math.floor((sseProgress.elapsed_seconds) / 60)}m {Math.round((sseProgress.elapsed_seconds) % 60)}s
+                    {sseProgress.eta_seconds != null && sseProgress.eta_seconds > 0 && (
+                      <> · ETA: ~{Math.ceil(sseProgress.eta_seconds / 60)}min</>
+                    )}
+                  </p>
+                )}
+
+                {renderStaleWarning && (
+                  <div className="render-stale-warning">
+                    ⚠️ {renderStaleWarning}
+                    <button
+                      className="stale-cancel-btn"
+                      onClick={() => { renderAbortRef.current?.abort(); }}
+                    >
+                      Anuluj render
+                    </button>
                   </div>
                 )}
 
