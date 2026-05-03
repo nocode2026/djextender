@@ -5,6 +5,12 @@ import { type AudioAnalysisResult } from "./audioAnalyzer";
 import { analyzeWithProSidecar } from "./proAnalysisClient";
 import { separateWithProSidecar } from "./proStemClient";
 import { renderExtendedWithProSidecar, type RenderExtendedResult } from "./proRenderClient";
+import {
+  transformAudioWithProSidecar,
+  transformPreviewWithProSidecar,
+  type TransformAudioResult,
+  type TransformPreviewResult,
+} from "./proTransformClient";
 import { qaRender, type QARenderResult } from "./proQAClient";
 import "./App.css";
 
@@ -43,6 +49,10 @@ type PlannerRequest = {
   stemPackageReady?: boolean;
   stemEngine?: string;
   stemPackageId?: string;
+  targetBpm?: number;
+  targetMusicalKey?: string;
+  timeStretchRatio?: number;
+  pitchSemitones?: number;
 };
 
 type PlanResponse = {
@@ -93,6 +103,52 @@ const AI_MODE_LABELS: Record<AiIntroOutroMode, string> = {
   ai_assisted: "AI intro/outro (Stable Audio)",
   deterministic: "Deterministyczny (tylko stemy)",
 };
+
+const KEY_OPTIONS = [
+  "C major", "C# major", "D major", "D# major", "E major", "F major", "F# major", "G major", "G# major", "A major", "A# major", "B major",
+  "C minor", "C# minor", "D minor", "D# minor", "E minor", "F minor", "F# minor", "G minor", "G# minor", "A minor", "A# minor", "B minor",
+];
+
+const NOTE_TO_SEMITONE: Record<string, number> = {
+  C: 0,
+  "C#": 1,
+  Db: 1,
+  D: 2,
+  "D#": 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  "F#": 6,
+  Gb: 6,
+  G: 7,
+  "G#": 8,
+  Ab: 8,
+  A: 9,
+  "A#": 10,
+  Bb: 10,
+  B: 11,
+};
+
+function parseMusicalKey(rawKey: string): { semitone: number; mode: "major" | "minor" } | null {
+  const normalized = rawKey.trim();
+  const match = normalized.match(/^([A-Ga-g](?:#|b)?)[\s_-]+(major|minor)$/i);
+  if (!match) return null;
+  const note = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+  const semitone = NOTE_TO_SEMITONE[note];
+  if (semitone === undefined) return null;
+  const mode = match[2].toLowerCase() === "major" ? "major" : "minor";
+  return { semitone, mode };
+}
+
+function semitoneDeltaBetweenKeys(sourceKey: string, targetKey: string): number | null {
+  const src = parseMusicalKey(sourceKey);
+  const dst = parseMusicalKey(targetKey);
+  if (!src || !dst || src.mode !== dst.mode) return null;
+  let delta = dst.semitone - src.semitone;
+  if (delta > 6) delta -= 12;
+  if (delta < -6) delta += 12;
+  return Math.max(-6, Math.min(6, delta));
+}
 
 function StepDot({ n, current }: { n: Step; current: Step }) {
   const state = n < current ? "done" : n === current ? "active" : "idle";
@@ -175,12 +231,23 @@ function App() {
   const [stylePreset, setStylePreset] = useState<StylePreset>("close_to_original");
   const [vocalHandling, setVocalHandling] = useState<VocalHandling>("no_vocals");
   const [aiIntroOutroMode, setAiIntroOutroMode] = useState<AiIntroOutroMode>("ai_assisted");
+  const [targetBpm, setTargetBpm] = useState<number>(120);
+  const [pitchSemitones, setPitchSemitones] = useState<number>(0);
+  const [targetMusicalKey, setTargetMusicalKey] = useState<string>("");
+  const [isPreviewingTransform, setIsPreviewingTransform] = useState(false);
+  const [transformPreview, setTransformPreview] = useState<TransformPreviewResult | null>(null);
+  const [transformResult, setTransformResult] = useState<TransformAudioResult | null>(null);
+  const transformPreviewRef = useRef<HTMLAudioElement | null>(null);
+  const [transformPreviewTime, setTransformPreviewTime] = useState(0);
+  const [transformPreviewDuration, setTransformPreviewDuration] = useState(0);
+  const [transformPreviewPlaying, setTransformPreviewPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [huggingfaceTokenInput, setHuggingfaceTokenInput] = useState("");
   const [tokenSavedBanner, setTokenSavedBanner] = useState("");
 
   // Step 4 - generate
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationFlow, setGenerationFlow] = useState<"extended" | "transform">("extended");
   const [generateStage, setGenerateStage] = useState("");
   const [renderResult, setRenderResult] = useState<RenderExtendedResult | null>(null);
   const [generateError, setGenerateError] = useState("");
@@ -232,6 +299,18 @@ function App() {
       setHuggingfaceTokenInput(saved);
     }
   }, []);
+
+  useEffect(() => {
+    if (!analysisResult) return;
+    setTargetBpm(analysisResult.bpm);
+    setPitchSemitones(0);
+    setTargetMusicalKey(analysisResult.musicalKey);
+    setTransformPreview(null);
+    setTransformResult(null);
+    setTransformPreviewTime(0);
+    setTransformPreviewDuration(0);
+    setTransformPreviewPlaying(false);
+  }, [analysisResult]);
 
   function saveHuggingfaceToken() {
     const trimmed = huggingfaceTokenInput.trim();
@@ -416,11 +495,18 @@ function App() {
       sourcePlayer.pause();
       sourcePlayer.currentTime = 0;
     }
+    const transformPreviewPlayer = transformPreviewRef.current;
+    if (transformPreviewPlayer) {
+      transformPreviewPlayer.pause();
+      transformPreviewPlayer.currentTime = 0;
+    }
     stemStop();
     setIsPlaying(false);
     setSrcPlaying(false);
+    setTransformPreviewPlaying(false);
     setPlayerTime(0);
     setSrcTime(0);
+    setTransformPreviewTime(0);
   }
 
   function loadFile(file: File) {
@@ -431,6 +517,11 @@ function App() {
     setQaResults([]);
     setAnalysisError("");
     setGenerateError("");
+    setTransformPreview(null);
+    setTransformResult(null);
+    setTransformPreviewTime(0);
+    setTransformPreviewDuration(0);
+    setTransformPreviewPlaying(false);
     setSelectedTake(0);
     setSrcTime(0);
     setSrcDuration(0);
@@ -490,9 +581,14 @@ function App() {
 
   async function handleGenerate() {
     if (!selectedFile || !analysisResult) return;
+    const safeTargetBpm = Number.isFinite(targetBpm) ? Math.max(1, targetBpm) : analysisResult.bpm;
+    const timeStretchRatio = Math.max(0.5, Math.min(2.0, safeTargetBpm / Math.max(analysisResult.bpm, 1)));
+    const safeSemitones = Math.max(-6, Math.min(6, Math.round(pitchSemitones)));
     setIsGenerating(true);
+    setGenerationFlow("extended");
     setGenerateError("");
     setRenderResult(null);
+    setTransformResult(null);
     setSseProgress(null);
     setStep(4);
 
@@ -547,6 +643,10 @@ function App() {
         stemPackageReady: stemPackage.isReady,
         stemEngine: stemPackage.stemEngine,
         stemPackageId: stemPackage.jobId,
+        targetBpm: safeTargetBpm,
+        targetMusicalKey: targetMusicalKey || undefined,
+        timeStretchRatio,
+        pitchSemitones: safeSemitones,
       };
 
       const plan = await invoke<PlanResponse>("build_extension_plan", { request: planRequest });
@@ -623,6 +723,63 @@ function App() {
       }
     } catch (err) {
       setGenerateError(err instanceof Error ? err.message : "Generation failed. Check the sidecar logs.");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  function applyTargetKey(nextKey: string) {
+    setTargetMusicalKey(nextKey);
+    if (!analysisResult) return;
+    const delta = semitoneDeltaBetweenKeys(analysisResult.musicalKey, nextKey);
+    if (delta === null) return;
+    setPitchSemitones(delta);
+  }
+
+  async function handlePreviewTransform() {
+    if (!selectedFile || !analysisResult) return;
+    setIsPreviewingTransform(true);
+    setGenerateError("");
+    try {
+      const preview = await transformPreviewWithProSidecar({
+        sourceFile: selectedFile,
+        sourceBpm: analysisResult.bpm,
+        targetBpm: Math.max(1, targetBpm),
+        pitchSemitones: Math.max(-6, Math.min(6, Math.round(pitchSemitones))),
+        previewSeconds: 30,
+      });
+      setTransformPreview(preview);
+      setTransformPreviewTime(0);
+      setTransformPreviewDuration(preview.durationSeconds);
+      setTransformPreviewPlaying(false);
+    } catch (err) {
+      setGenerateError(err instanceof Error ? err.message : "Preview transform failed.");
+    } finally {
+      setIsPreviewingTransform(false);
+    }
+  }
+
+  async function handleSaveTransformOnly() {
+    if (!selectedFile || !analysisResult) return;
+    setStep(4);
+    setIsGenerating(true);
+    setGenerationFlow("transform");
+    setGenerateError("");
+    setRenderResult(null);
+    setTransformResult(null);
+    setSseProgress({ step: 1, total: 3, label: "Przetwarzam tempo i tonację (Rubber Band)..." });
+    try {
+      const result = await transformAudioWithProSidecar({
+        sourceFile: selectedFile,
+        sourceBpm: analysisResult.bpm,
+        targetBpm: Math.max(1, targetBpm),
+        pitchSemitones: Math.max(-6, Math.min(6, Math.round(pitchSemitones))),
+      });
+      setSseProgress({ step: 3, total: 3, label: "Transformacja zakończona ✓" });
+      setTransformResult(result);
+      setGenerateStage("");
+    } catch (err) {
+      setGenerateError(err instanceof Error ? err.message : "Transform save failed.");
     } finally {
       setIsGenerating(false);
     }
@@ -770,6 +927,8 @@ function App() {
     setSelectedFile(null);
     setAnalysisResult(null);
     setRenderResult(null);
+    setTransformPreview(null);
+    setTransformResult(null);
     setQaResults([]);
     setIsQARunning(false);
   }
@@ -789,6 +948,23 @@ function App() {
   }
   function srcSeek(e: React.ChangeEvent<HTMLInputElement>) {
     if (srcPlayerRef.current) srcPlayerRef.current.currentTime = Number(e.target.value);
+  }
+
+  function toggleTransformPreviewPlay() {
+    const el = transformPreviewRef.current;
+    if (!el) return;
+    if (el.paused) {
+      void el.play();
+    } else {
+      el.pause();
+    }
+  }
+
+  function seekTransformPreview(e: React.ChangeEvent<HTMLInputElement>) {
+    const el = transformPreviewRef.current;
+    if (!el) return;
+    const t = Number(e.target.value);
+    el.currentTime = t;
   }
 
   // Beatgrid canvas dla source playera (DPR-aware + RAF throttle)
@@ -1283,17 +1459,128 @@ function App() {
                 />
               </div>
 
+              <div className="config-section">
+                <label className="config-label">Nowe BPM (tempo bez zmiany tonacji)</label>
+                <div className="transform-inline-row">
+                  <input
+                    className="settings-input transform-input"
+                    type="number"
+                    min={60}
+                    max={200}
+                    step={0.1}
+                    value={Number.isFinite(targetBpm) ? targetBpm : analysisResult.bpm}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      if (Number.isFinite(next)) setTargetBpm(next);
+                    }}
+                  />
+                  <span className="transform-hint">
+                    Tempo ratio: {(Math.max(1, targetBpm) / Math.max(analysisResult.bpm, 1)).toFixed(3)}x
+                  </span>
+                </div>
+              </div>
+
+              <div className="config-section">
+                <label className="config-label">Zmiana tonacji (półtony, bez zmiany tempa)</label>
+                <div className="transform-inline-row">
+                  <input
+                    className="transform-range"
+                    type="range"
+                    min={-6}
+                    max={6}
+                    step={1}
+                    value={pitchSemitones}
+                    onChange={(e) => setPitchSemitones(Number(e.target.value))}
+                  />
+                  <span className="transform-semitones">{pitchSemitones >= 0 ? `+${pitchSemitones}` : pitchSemitones} st</span>
+                </div>
+              </div>
+
+              <div className="config-section">
+                <label className="config-label">Docelowa tonacja (alternatywa dla suwaka)</label>
+                <div className="transform-inline-row">
+                  <select
+                    className="settings-input transform-select"
+                    value={targetMusicalKey}
+                    onChange={(e) => applyTargetKey(e.target.value)}
+                  >
+                    {KEY_OPTIONS.map((keyOpt) => (
+                      <option key={keyOpt} value={keyOpt}>{keyOpt}</option>
+                    ))}
+                  </select>
+                  <span className="transform-hint">Auto ustawia półtony względem {analysisResult.musicalKey}</span>
+                </div>
+              </div>
+
             </div>
 
-            <button
-              className="cta-button cta-button--generate"
-              onClick={handleGenerate}
-              disabled={!sidecarOnline || isGenerating}
-              title={!sidecarOnline ? "Sidecar offline — najpierw uruchom serwer analizy" : undefined}
-            >
-              <span className="cta-icon">?</span>
-              Generuj extended mix
-            </button>
+            <div className="transform-actions">
+              <button
+                className="ghost-button"
+                onClick={handlePreviewTransform}
+                disabled={!sidecarOnline || isGenerating || isPreviewingTransform}
+              >
+                {isPreviewingTransform ? "Generuję preview..." : "Preview 30 sekund"}
+              </button>
+              <button
+                className="ghost-button"
+                onClick={handleSaveTransformOnly}
+                disabled={!sidecarOnline || isGenerating}
+                title={!sidecarOnline ? "Sidecar offline — najpierw uruchom serwer analizy" : undefined}
+              >
+                Save (tylko transform)
+              </button>
+              <button
+                className="cta-button cta-button--generate"
+                onClick={handleGenerate}
+                disabled={!sidecarOnline || isGenerating}
+                title={!sidecarOnline ? "Sidecar offline — najpierw uruchom serwer analizy" : undefined}
+              >
+                <span className="cta-icon">?</span>
+                Create Intro/Outro
+              </button>
+            </div>
+
+            {transformPreview && (
+              <div className="transform-preview-card">
+                <p className="source-player__label">Preview transformacji (30s, Rubber Band)</p>
+                <audio
+                  ref={transformPreviewRef}
+                  src={`${SIDECAR}/serve_file?path=${encodeURIComponent(transformPreview.previewPath)}`}
+                  preload="metadata"
+                  onLoadedMetadata={(e) => setTransformPreviewDuration(e.currentTarget.duration)}
+                  onTimeUpdate={(e) => setTransformPreviewTime(e.currentTarget.currentTime)}
+                  onPlay={() => setTransformPreviewPlaying(true)}
+                  onPause={() => setTransformPreviewPlaying(false)}
+                  onEnded={() => { setTransformPreviewPlaying(false); setTransformPreviewTime(0); }}
+                />
+                <div className="player-controls">
+                  <button className="play-btn" type="button" onClick={toggleTransformPreviewPlay}>
+                    {transformPreviewPlaying ? (
+                      <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <rect x="3" y="2" width="4" height="14" rx="1.5" fill="currentColor"/>
+                        <rect x="11" y="2" width="4" height="14" rx="1.5" fill="currentColor"/>
+                      </svg>
+                    ) : (
+                      <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M4 2.5l12 6.5-12 6.5V2.5z" fill="currentColor"/>
+                      </svg>
+                    )}
+                  </button>
+                  <span className="player-time">{formatSeconds(transformPreviewTime)}</span>
+                  <input
+                    type="range"
+                    className="player-seek"
+                    min={0}
+                    max={transformPreviewDuration || transformPreview.durationSeconds}
+                    step={0.1}
+                    value={transformPreviewTime}
+                    onChange={seekTransformPreview}
+                  />
+                  <span className="player-time player-time--dur">{formatSeconds(transformPreviewDuration || transformPreview.durationSeconds)}</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1321,28 +1608,50 @@ function App() {
                 )}
 
                 <div className="stage-list">
-                  <div className={`stage-item ${generateStage.includes("Separuję") || generateStage.includes("Demucs") ? "stage-item--active" : generateStage && !generateStage.includes("Separuję") ? "stage-item--done" : ""}`}>
-                    <span className="stage-dot" />
-                    <span>
-                      Separacja stemów (AI Demucs)
-                      {(generateStage.includes("Separuję") || generateStage.includes("Demucs")) && sseProgress && (
-                        <em className="stage-sub"> — {sseProgress.label}</em>
-                      )}
-                    </span>
-                  </div>
-                  <div className={`stage-item ${generateStage.includes("Buduję") ? "stage-item--active" : generateStage.includes("Renderuję") || renderResult ? "stage-item--done" : ""}`}>
-                    <span className="stage-dot" />
-                    Buduję plan aranżacji
-                  </div>
-                  <div className={`stage-item ${generateStage.includes("Renderuję") ? "stage-item--active" : renderResult ? "stage-item--done" : ""}`}>
-                    <span className="stage-dot" />
-                    <span>
-                      Renderuję audio
-                      {generateStage.includes("Renderuję") && sseProgress && (
-                        <em className="stage-sub"> — {sseProgress.label}</em>
-                      )}
-                    </span>
-                  </div>
+                  {generationFlow === "transform" ? (
+                    <>
+                      <div className="stage-item stage-item--active">
+                        <span className="stage-dot" />
+                        <span>
+                          Transformacja Rubber Band
+                          {sseProgress && <em className="stage-sub"> — {sseProgress.label}</em>}
+                        </span>
+                      </div>
+                      <div className={`stage-item ${sseProgress && sseProgress.step >= 2 ? "stage-item--done" : ""}`}>
+                        <span className="stage-dot" />
+                        Eksport formatów WAV/MP3/AIFF
+                      </div>
+                      <div className={`stage-item ${sseProgress && sseProgress.step >= 3 ? "stage-item--done" : ""}`}>
+                        <span className="stage-dot" />
+                        Gotowe
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className={`stage-item ${generateStage.includes("Separuję") || generateStage.includes("Demucs") ? "stage-item--active" : generateStage && !generateStage.includes("Separuję") ? "stage-item--done" : ""}`}>
+                        <span className="stage-dot" />
+                        <span>
+                          Separacja stemów (AI Demucs)
+                          {(generateStage.includes("Separuję") || generateStage.includes("Demucs")) && sseProgress && (
+                            <em className="stage-sub"> — {sseProgress.label}</em>
+                          )}
+                        </span>
+                      </div>
+                      <div className={`stage-item ${generateStage.includes("Buduję") ? "stage-item--active" : generateStage.includes("Renderuję") || renderResult ? "stage-item--done" : ""}`}>
+                        <span className="stage-dot" />
+                        Buduję plan aranżacji
+                      </div>
+                      <div className={`stage-item ${generateStage.includes("Renderuję") ? "stage-item--active" : renderResult ? "stage-item--done" : ""}`}>
+                        <span className="stage-dot" />
+                        <span>
+                          Renderuję audio
+                          {generateStage.includes("Renderuję") && sseProgress && (
+                            <em className="stage-sub"> — {sseProgress.label}</em>
+                          )}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -1354,6 +1663,57 @@ function App() {
                 <div className="error-actions">
                   <button className="ghost-button" onClick={() => setStep(3)}>← Powrót do konfiguracji</button>
                   <button className="ghost-button" onClick={handleGenerate}>Ponów</button>
+                </div>
+              </div>
+            )}
+
+            {!isGenerating && transformResult && !renderResult && (
+              <div className="result-view">
+                <div className="view-header">
+                  <h2>Transformacja gotowa</h2>
+                  <p className="view-sub">
+                    {selectedFile?.name} · {formatSeconds(transformResult.durationSeconds)} · {transformResult.sampleRate / 1000} kHz
+                  </p>
+                </div>
+
+                <div className="take-card">
+                  <p className="take-name">Tempo/tonacja zmienione niezależnie (Rubber Band)</p>
+                  <p className="take-meta">
+                    Źródło: {analysisResult?.bpm ?? "-"} BPM → Cel: {Math.max(1, targetBpm).toFixed(1)} BPM · Pitch: {pitchSemitones >= 0 ? `+${pitchSemitones}` : pitchSemitones} st
+                  </p>
+
+                  <div className="download-grid">
+                    <button className="download-btn download-btn--wav" onClick={() => openFile(transformResult.wavPath)}>
+                      <span className="dl-icon">&#8659;</span>
+                      <span className="dl-label">WAV</span>
+                      <span className="dl-sub">44.1 kHz · 24-bit</span>
+                    </button>
+                    <button className="download-btn download-btn--mp3" onClick={() => openFile(transformResult.mp3Path)}>
+                      <span className="dl-icon">&#8659;</span>
+                      <span className="dl-label">MP3</span>
+                      <span className="dl-sub">320 kbps</span>
+                    </button>
+                    <button className="download-btn download-btn--aiff" onClick={() => openFile(transformResult.aiffPath)}>
+                      <span className="dl-icon">&#8659;</span>
+                      <span className="dl-label">AIFF</span>
+                      <span className="dl-sub">Lossless</span>
+                    </button>
+                  </div>
+
+                  <div className="take-actions">
+                    <button className="open-folder-btn" onClick={() => openFolder(transformResult.outputDirectory)}>
+                      Otwórz folder wynikowy
+                    </button>
+                    <button className="ghost-button ghost-button--sm" onClick={() => setStep(3)}>
+                      ← Wróć do konfiguracji
+                    </button>
+                  </div>
+
+                  {transformResult.warnings.length > 0 && (
+                    <ul className="analysis-warnings-list">
+                      {transformResult.warnings.map((w) => <li key={w}>{w}</li>)}
+                    </ul>
+                  )}
                 </div>
               </div>
             )}

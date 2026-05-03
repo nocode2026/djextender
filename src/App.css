@@ -210,6 +210,54 @@ html, body, #root {
 .config-section { display: flex; flex-direction: column; gap: 10px; }
 .config-label { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-2); }
 
+.transform-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.transform-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.transform-input {
+  max-width: 160px;
+}
+
+.transform-select {
+  min-width: 220px;
+}
+
+.transform-range {
+  flex: 1;
+  min-width: 220px;
+  accent-color: var(--accent-2);
+}
+
+.transform-semitones {
+  min-width: 64px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent-2);
+}
+
+.transform-hint {
+  font-size: 0.78rem;
+  color: var(--text-3);
+}
+
+.transform-preview-card {
+  margin-top: 14px;
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+}
+
 .pill-group { display: flex; flex-wrap: wrap; gap: 8px; }
 .pill {
   background: var(--bg-card); border: 1px solid var(--border); color: var(--text-2);
@@ -622,6 +670,25 @@ html, body, #root {
   background: var(--accent);
   opacity: 0.3;
   animation: qa-pulse 1.2s ease-in-out infinite;
+
+@media (max-width: 760px) {
+  .transform-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .transform-inline-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .transform-input,
+  .transform-select,
+  .transform-range {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+}
 }
 .qa-running__dot--2 { animation-delay: 0.2s; }
 .qa-running__dot--3 { animation-delay: 0.4s; }

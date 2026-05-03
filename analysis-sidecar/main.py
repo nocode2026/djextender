@@ -186,6 +186,28 @@ class RenderExtendedResult(BaseModel):
     renderEngine: Literal["deterministic-sidecar-v1"]
 
 
+class TransformPreviewResult(BaseModel):
+    jobId: str
+    outputDirectory: str
+    previewPath: str
+    durationSeconds: float
+    sampleRate: int
+    warnings: list[str]
+    transformEngine: Literal["rubberband-ffmpeg-v1"]
+
+
+class TransformAudioResult(BaseModel):
+    jobId: str
+    outputDirectory: str
+    wavPath: str
+    mp3Path: str
+    aiffPath: str
+    durationSeconds: float
+    sampleRate: int
+    warnings: list[str]
+    transformEngine: Literal["rubberband-ffmpeg-v1"]
+
+
 class StableAudioGenerateResult(BaseModel):
     jobId: str
     outputPath: str
@@ -912,7 +934,11 @@ def _apply_rubberband_with_ffmpeg(
     pitch_ratio = float(2.0 ** (pitch_semitones / 12.0))
     pitch_ratio = float(np.clip(pitch_ratio, 0.5, 2.0))
 
-    filter_expr = f"rubberband=tempo={clamped_tempo:.6f}:pitch={pitch_ratio:.6f}"
+    # Keep tempo and pitch independent with Rubber Band high-quality settings.
+    filter_expr = (
+        f"rubberband=tempo={clamped_tempo:.6f}:pitch={pitch_ratio:.6f}"
+        ":formant=preserved:pitchq=quality:transients=crisp:window=long"
+    )
     args = [
         "-af",
         filter_expr,
@@ -972,6 +998,151 @@ def serve_file(path: str) -> FileResponse:
         path=resolved,
         media_type=mime or "audio/wav",
         headers={"Accept-Ranges": "bytes", "Cache-Control": "no-cache"},
+    )
+
+
+@app.post("/transform_preview", response_model=TransformPreviewResult)
+async def transform_preview(
+    file: UploadFile = File(...),
+    source_bpm: float = Form(...),
+    target_bpm: float = Form(...),
+    pitch_semitones: float = Form(0.0),
+    preview_seconds: float = Form(30.0),
+) -> TransformPreviewResult:
+    """Generate 30s transformed preview (tempo and pitch independent)."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing source filename")
+
+    ffmpeg_bin = _ffmpeg_path()
+    if ffmpeg_bin is None:
+        raise HTTPException(status_code=500, detail="FFmpeg not found in PATH")
+
+    raw_source = await file.read()
+    if not raw_source:
+        raise HTTPException(status_code=400, detail="Empty source audio")
+
+    src_bpm = max(float(source_bpm), 1.0)
+    dst_bpm = max(float(target_bpm), 1.0)
+    tempo_ratio = float(np.clip(dst_bpm / src_bpm, 0.5, 2.0))
+    semitones = float(np.clip(pitch_semitones, -12.0, 12.0))
+    preview_s = float(np.clip(preview_seconds, 5.0, 45.0))
+
+    render_job = uuid4().hex[:12]
+    output_dir = Path.cwd() / "runs" / "transforms" / render_job
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = output_dir / "source_input.tmp"
+    preview_wav_path = output_dir / "preview_30s.wav"
+    input_path.write_bytes(raw_source)
+
+    pitch_ratio = float(np.clip(2.0 ** (semitones / 12.0), 0.5, 2.0))
+    filter_expr = (
+        f"rubberband=tempo={tempo_ratio:.6f}:pitch={pitch_ratio:.6f}"
+        ":formant=preserved:pitchq=quality:transients=crisp:window=long"
+        f",atrim=end={preview_s:.3f}"
+    )
+    ok, err = _convert_with_ffmpeg(
+        ffmpeg_bin,
+        input_path,
+        preview_wav_path,
+        ["-af", filter_expr, "-ar", "44100", "-c:a", "pcm_s24le"],
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "Preview transform failed")
+
+    preview_audio, sr = sf.read(str(preview_wav_path), always_2d=True)
+    duration_sec = float(preview_audio.shape[0] / max(sr, 1))
+    input_path.unlink(missing_ok=True)
+
+    return TransformPreviewResult(
+        jobId=render_job,
+        outputDirectory=str(output_dir),
+        previewPath=str(preview_wav_path),
+        durationSeconds=duration_sec,
+        sampleRate=int(sr),
+        warnings=[],
+        transformEngine="rubberband-ffmpeg-v1",
+    )
+
+
+@app.post("/transform_audio", response_model=TransformAudioResult)
+async def transform_audio(
+    file: UploadFile = File(...),
+    source_bpm: float = Form(...),
+    target_bpm: float = Form(...),
+    pitch_semitones: float = Form(0.0),
+) -> TransformAudioResult:
+    """Save full transformed audio (tempo and pitch independent)."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing source filename")
+
+    ffmpeg_bin = _ffmpeg_path()
+    if ffmpeg_bin is None:
+        raise HTTPException(status_code=500, detail="FFmpeg not found in PATH")
+
+    raw_source = await file.read()
+    if not raw_source:
+        raise HTTPException(status_code=400, detail="Empty source audio")
+
+    src_bpm = max(float(source_bpm), 1.0)
+    dst_bpm = max(float(target_bpm), 1.0)
+    tempo_ratio = float(np.clip(dst_bpm / src_bpm, 0.5, 2.0))
+    semitones = float(np.clip(pitch_semitones, -12.0, 12.0))
+
+    render_job = uuid4().hex[:12]
+    output_dir = Path.cwd() / "runs" / "transforms" / render_job
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_path = output_dir / "source_input.tmp"
+    wav_path = output_dir / "transform.wav"
+    mp3_path = output_dir / "transform.mp3"
+    aiff_path = output_dir / "transform.aiff"
+    warnings: list[str] = []
+    input_path.write_bytes(raw_source)
+
+    ok, err = _apply_rubberband_with_ffmpeg(
+        ffmpeg_bin=ffmpeg_bin,
+        input_path=input_path,
+        output_path=wav_path,
+        target_sample_rate=44100,
+        time_stretch_ratio=tempo_ratio,
+        pitch_semitones=semitones,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail=err or "Transform failed")
+
+    mp3_ok, mp3_error = _convert_with_ffmpeg(
+        ffmpeg_bin,
+        wav_path,
+        mp3_path,
+        ["-codec:a", "libmp3lame", "-b:a", "320k", "-ar", "44100"],
+    )
+    if not mp3_ok:
+        warnings.append(mp3_error or "MP3 conversion failed")
+        shutil.copy2(wav_path, mp3_path)
+
+    aiff_ok, aiff_error = _convert_with_ffmpeg(
+        ffmpeg_bin,
+        wav_path,
+        aiff_path,
+        ["-c:a", "pcm_s24be", "-ar", "44100"],
+    )
+    if not aiff_ok:
+        warnings.append(aiff_error or "AIFF conversion failed")
+        shutil.copy2(wav_path, aiff_path)
+
+    transformed_audio, sr = sf.read(str(wav_path), always_2d=True)
+    duration_sec = float(transformed_audio.shape[0] / max(sr, 1))
+    input_path.unlink(missing_ok=True)
+
+    return TransformAudioResult(
+        jobId=render_job,
+        outputDirectory=str(output_dir),
+        wavPath=str(wav_path),
+        mp3Path=str(mp3_path),
+        aiffPath=str(aiff_path),
+        durationSeconds=duration_sec,
+        sampleRate=int(sr),
+        warnings=warnings,
+        transformEngine="rubberband-ffmpeg-v1",
     )
 
 
