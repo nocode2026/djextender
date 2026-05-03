@@ -1220,8 +1220,8 @@ function App() {
 
             {sidecarOnline === false && (
               <div className="sidecar-warning">
-                <strong>Sidecar nie dziala</strong> - uruchom go przed wrzuceniem pliku:
-                <code>wsl -d Ubuntu-22.04 --cd /mnt/c/Users/dawid/Desktop/PROJEKTY/DJextender/analysis-sidecar --exec .venv-wsl2/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8765</code>
+                <strong>Sidecar nie działa</strong> - uruchom go przed wrzuceniem pliku:
+                <code>wsl -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/dawid/Desktop/PROJEKTY/DJextender/analysis-sidecar && .venv-wsl2/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8765"</code>
               </div>
             )}
 
