@@ -1120,9 +1120,7 @@ function App() {
       {/* Header */}
       <header className="topbar">
         <div className="brand">
-          <span className="brand-icon">?</span>
           <span className="brand-name">DJextender</span>
-          <span className="brand-tag">STUDIO</span>
         </div>
         <div className="step-track">
           <StepDot n={1} current={step} />
@@ -1148,13 +1146,7 @@ function App() {
               <path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.427 1.756 2.925 0 3.352a1.724 1.724 0 0 0-1.066 2.572c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.427 1.756-2.925 1.756-3.352 0a1.724 1.724 0 0 0-2.572-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.427-1.756-2.925 0-3.352A1.724 1.724 0 0 0 5.38 7.753c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.066Z" stroke="currentColor" strokeWidth="1.5"/>
               <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
             </svg>
-            Ustawienia
           </button>
-          <div className={`sidecar-status ${sidecarOnline === null ? "sidecar-status--checking" : sidecarOnline ? "sidecar-status--ok" : "sidecar-status--offline"}`}>
-            <span className="sidecar-dot" />
-            {sidecarOnline === null ? "Łączenie..." : sidecarOnline ? "sidecar działa" : "sidecar offline"}
-          </div>
-          <span className="badge-pro">PRO</span>
         </div>
       </header>
 

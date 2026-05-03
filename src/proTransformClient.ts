@@ -5,7 +5,7 @@ export type TransformPreviewResult = {
   durationSeconds: number;
   sampleRate: number;
   warnings: string[];
-  transformEngine: "rubberband-ffmpeg-v1";
+  transformEngine: "rubberband-cli-v1";
 };
 
 export type TransformAudioResult = {
@@ -17,7 +17,7 @@ export type TransformAudioResult = {
   durationSeconds: number;
   sampleRate: number;
   warnings: string[];
-  transformEngine: "rubberband-ffmpeg-v1";
+  transformEngine: "rubberband-cli-v1";
 };
 
 const DEFAULT_SIDECAR_URL = "http://127.0.0.1:8765";

@@ -54,14 +54,7 @@ html, body, #root {
 }
 
 .brand { display: flex; align-items: center; gap: 8px; }
-.brand-icon { font-size: 1.2rem; color: var(--accent-2); }
 .brand-name { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.04em; }
-.brand-tag {
-  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.18em;
-  padding: 2px 7px; border-radius: 999px;
-  background: rgba(124, 109, 250, 0.18); color: var(--accent-2);
-  border: 1px solid rgba(124, 109, 250, 0.3); margin-left: 2px;
-}
 
 .step-track { display: flex; align-items: center; }
 .step-dot {
@@ -76,24 +69,17 @@ html, body, #root {
 .step-line { width: 48px; height: 1px; background: var(--border); transition: background 0.3s ease; }
 .step-line--done { background: rgba(74, 222, 128, 0.35); }
 
-.badge-pro {
-  font-size: 0.65rem; font-weight: 800; letter-spacing: 0.15em;
-  padding: 4px 10px; border-radius: 999px;
-  background: linear-gradient(135deg, var(--accent), #a891ff); color: #fff;
-}
-
 .settings-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   background: var(--bg-card2);
   border: 1px solid var(--border);
   color: var(--text-2);
   border-radius: 999px;
-  padding: 6px 12px;
-  font-size: 0.76rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  width: 36px;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
   cursor: pointer;
   transition: all 0.15s;
 }

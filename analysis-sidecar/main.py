@@ -193,7 +193,7 @@ class TransformPreviewResult(BaseModel):
     durationSeconds: float
     sampleRate: int
     warnings: list[str]
-    transformEngine: Literal["rubberband-ffmpeg-v1"]
+    transformEngine: Literal["rubberband-cli-v1"]
 
 
 class TransformAudioResult(BaseModel):
@@ -205,7 +205,7 @@ class TransformAudioResult(BaseModel):
     durationSeconds: float
     sampleRate: int
     warnings: list[str]
-    transformEngine: Literal["rubberband-ffmpeg-v1"]
+    transformEngine: Literal["rubberband-cli-v1"]
 
 
 class StableAudioGenerateResult(BaseModel):
@@ -910,6 +910,10 @@ def _ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _rubberband_path() -> str | None:
+    return shutil.which("rubberband")
+
+
 def _convert_with_ffmpeg(ffmpeg_bin: str, input_path: Path, output_path: Path, args: list[str]) -> tuple[bool, str | None]:
     command = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", str(input_path), *args, str(output_path)]
     try:
@@ -922,8 +926,8 @@ def _convert_with_ffmpeg(ffmpeg_bin: str, input_path: Path, output_path: Path, a
         return False, f"FFmpeg conversion failed for {output_path.name}: {detail[:300]}"
 
 
-def _apply_rubberband_with_ffmpeg(
-    ffmpeg_bin: str,
+def _apply_rubberband_with_cli(
+    rubberband_bin: str,
     input_path: Path,
     output_path: Path,
     target_sample_rate: int,
@@ -931,23 +935,42 @@ def _apply_rubberband_with_ffmpeg(
     pitch_semitones: float,
 ) -> tuple[bool, str | None]:
     clamped_tempo = float(np.clip(time_stretch_ratio, 0.5, 2.0))
-    pitch_ratio = float(2.0 ** (pitch_semitones / 12.0))
-    pitch_ratio = float(np.clip(pitch_ratio, 0.5, 2.0))
+    semitones = float(np.clip(pitch_semitones, -12.0, 12.0))
 
-    # Keep tempo and pitch independent with Rubber Band high-quality settings.
-    filter_expr = (
-        f"rubberband=tempo={clamped_tempo:.6f}:pitch={pitch_ratio:.6f}"
-        ":formant=preserved:pitchq=quality:transients=crisp:window=long"
-    )
-    args = [
-        "-af",
-        filter_expr,
-        "-ar",
-        str(target_sample_rate),
-        "-c:a",
-        "pcm_s24le",
+    # Native Rubber Band CLI in high-quality mode.
+    command = [
+        rubberband_bin,
+        "--tempo",
+        f"{clamped_tempo:.6f}",
+        "--pitch",
+        f"{semitones:.6f}",
+        "--formant",
+        "--pitch-hq",
+        "--transients",
+        "crisp",
+        "--window",
+        "long",
+        str(input_path),
+        str(output_path),
     ]
-    return _convert_with_ffmpeg(ffmpeg_bin, input_path, output_path, args)
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return False, f"Rubber Band timeout: {output_path.name}"
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "unknown Rubber Band error").strip()
+        return False, f"Rubber Band failed for {output_path.name}: {detail[:300]}"
+
+    if target_sample_rate > 0:
+        try:
+            rb_audio, rb_sr = sf.read(str(output_path), always_2d=True)
+            rb_audio = _ensure_stereo(rb_audio.astype(np.float32))
+            rb_audio = _resample_stereo(rb_audio, int(rb_sr), int(target_sample_rate))
+            sf.write(str(output_path), rb_audio, int(target_sample_rate), subtype="PCM_24")
+        except Exception as exc:  # pragma: no cover
+            return False, f"Rubber Band post-resample failed: {exc}"
+
+    return True, None
 
 
 def _extract_essentia_estimates(audio_mono: np.ndarray, sample_rate: int) -> tuple[float, str, float]:
@@ -1013,9 +1036,9 @@ async def transform_preview(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing source filename")
 
-    ffmpeg_bin = _ffmpeg_path()
-    if ffmpeg_bin is None:
-        raise HTTPException(status_code=500, detail="FFmpeg not found in PATH")
+    rubberband_bin = _rubberband_path()
+    if rubberband_bin is None:
+        raise HTTPException(status_code=500, detail="Rubber Band CLI not found in PATH (expected command: rubberband)")
 
     raw_source = await file.read()
     if not raw_source:
@@ -1030,28 +1053,35 @@ async def transform_preview(
     render_job = uuid4().hex[:12]
     output_dir = Path.cwd() / "runs" / "transforms" / render_job
     output_dir.mkdir(parents=True, exist_ok=True)
-    input_path = output_dir / "source_input.tmp"
+    input_path = output_dir / "source_input.wav"
+    transformed_path = output_dir / "preview_full.wav"
     preview_wav_path = output_dir / "preview_30s.wav"
-    input_path.write_bytes(raw_source)
+    try:
+        source_audio, source_sr = sf.read(io.BytesIO(raw_source), always_2d=True)
+        source_audio = _ensure_stereo(source_audio.astype(np.float32))
+        source_audio = _resample_stereo(source_audio, int(source_sr), 44100)
+        sf.write(str(input_path), source_audio, 44100, subtype="PCM_24")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot decode source audio: {exc}") from exc
 
-    pitch_ratio = float(np.clip(2.0 ** (semitones / 12.0), 0.5, 2.0))
-    filter_expr = (
-        f"rubberband=tempo={tempo_ratio:.6f}:pitch={pitch_ratio:.6f}"
-        ":formant=preserved:pitchq=quality:transients=crisp:window=long"
-        f",atrim=end={preview_s:.3f}"
-    )
-    ok, err = _convert_with_ffmpeg(
-        ffmpeg_bin,
-        input_path,
-        preview_wav_path,
-        ["-af", filter_expr, "-ar", "44100", "-c:a", "pcm_s24le"],
+    ok, err = _apply_rubberband_with_cli(
+        rubberband_bin=rubberband_bin,
+        input_path=input_path,
+        output_path=transformed_path,
+        target_sample_rate=44100,
+        time_stretch_ratio=tempo_ratio,
+        pitch_semitones=semitones,
     )
     if not ok:
         raise HTTPException(status_code=500, detail=err or "Preview transform failed")
 
-    preview_audio, sr = sf.read(str(preview_wav_path), always_2d=True)
+    transformed_audio, sr = sf.read(str(transformed_path), always_2d=True)
+    max_samples = int(round(preview_s * max(sr, 1)))
+    preview_audio = transformed_audio[:max_samples] if max_samples > 0 else transformed_audio
+    sf.write(str(preview_wav_path), preview_audio, int(sr), subtype="PCM_24")
     duration_sec = float(preview_audio.shape[0] / max(sr, 1))
     input_path.unlink(missing_ok=True)
+    transformed_path.unlink(missing_ok=True)
 
     return TransformPreviewResult(
         jobId=render_job,
@@ -1060,7 +1090,7 @@ async def transform_preview(
         durationSeconds=duration_sec,
         sampleRate=int(sr),
         warnings=[],
-        transformEngine="rubberband-ffmpeg-v1",
+        transformEngine="rubberband-cli-v1",
     )
 
 
@@ -1074,6 +1104,10 @@ async def transform_audio(
     """Save full transformed audio (tempo and pitch independent)."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing source filename")
+
+    rubberband_bin = _rubberband_path()
+    if rubberband_bin is None:
+        raise HTTPException(status_code=500, detail="Rubber Band CLI not found in PATH (expected command: rubberband)")
 
     ffmpeg_bin = _ffmpeg_path()
     if ffmpeg_bin is None:
@@ -1091,15 +1125,21 @@ async def transform_audio(
     render_job = uuid4().hex[:12]
     output_dir = Path.cwd() / "runs" / "transforms" / render_job
     output_dir.mkdir(parents=True, exist_ok=True)
-    input_path = output_dir / "source_input.tmp"
+    input_path = output_dir / "source_input.wav"
     wav_path = output_dir / "transform.wav"
     mp3_path = output_dir / "transform.mp3"
     aiff_path = output_dir / "transform.aiff"
     warnings: list[str] = []
-    input_path.write_bytes(raw_source)
+    try:
+        source_audio, source_sr = sf.read(io.BytesIO(raw_source), always_2d=True)
+        source_audio = _ensure_stereo(source_audio.astype(np.float32))
+        source_audio = _resample_stereo(source_audio, int(source_sr), 44100)
+        sf.write(str(input_path), source_audio, 44100, subtype="PCM_24")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot decode source audio: {exc}") from exc
 
-    ok, err = _apply_rubberband_with_ffmpeg(
-        ffmpeg_bin=ffmpeg_bin,
+    ok, err = _apply_rubberband_with_cli(
+        rubberband_bin=rubberband_bin,
         input_path=input_path,
         output_path=wav_path,
         target_sample_rate=44100,
@@ -1142,7 +1182,7 @@ async def transform_audio(
         durationSeconds=duration_sec,
         sampleRate=int(sr),
         warnings=warnings,
-        transformEngine="rubberband-ffmpeg-v1",
+        transformEngine="rubberband-cli-v1",
     )
 
 
@@ -1663,8 +1703,11 @@ async def render_extended(
     warnings: list[str] = []
     rendered_takes: list[RenderedTake] = []
     ffmpeg_bin = _ffmpeg_path()
+    rubberband_bin = _rubberband_path()
     if ffmpeg_bin is None:
         warnings.append("FFmpeg not found in PATH. MP3 and AIFF exports will fallback to WAV copies.")
+    if (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4) and rubberband_bin is None:
+        raise HTTPException(status_code=500, detail="Rubber Band CLI not found in PATH (expected command: rubberband)")
 
     take_count = len(takes_payload) if takes_payload else int(request.get("takeCount") or 1)
     take_count = max(1, min(5, take_count))
@@ -1805,10 +1848,10 @@ async def render_extended(
         sf.write(wav_path, rendered, target_sample_rate, subtype="PCM_24")
 
         master_wav_path = wav_path
-        if ffmpeg_bin is not None and (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4):
+        if rubberband_bin is not None and (abs(time_stretch_ratio - 1.0) > 1e-4 or abs(pitch_semitones) > 1e-4):
             processed_path = output_dir / f"take_{take_index + 1}_post.wav"
-            post_ok, post_error = _apply_rubberband_with_ffmpeg(
-                ffmpeg_bin=ffmpeg_bin,
+            post_ok, post_error = _apply_rubberband_with_cli(
+                rubberband_bin=rubberband_bin,
                 input_path=wav_path,
                 output_path=processed_path,
                 target_sample_rate=target_sample_rate,
