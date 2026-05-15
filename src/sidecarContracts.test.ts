@@ -201,6 +201,43 @@ describe("sidecar contract validators", () => {
     expect(result.stems).toHaveLength(4);
   });
 
+  it("retries stem final result when endpoint briefly returns pending", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { jobId: "stem123", status: "started" }))
+      .mockResolvedValueOnce(jsonResponse(200, validStemProgress))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }))
+      .mockResolvedValueOnce(jsonResponse(200, validStemResult));
+
+    const resultPromise = separateWithProSidecar(makeFile());
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(300);
+    const result = await resultPromise;
+
+    expect(result.jobId).toBe("stem123");
+    expect(result.stemEngine).toBe("demucs-sidecar");
+  });
+
+  it("fails stem result fetch after max pending attempts", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { jobId: "stem123", status: "started" }))
+      .mockResolvedValueOnce(jsonResponse(200, validStemProgress))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "stem123" }));
+
+    const resultPromise = separateWithProSidecar(makeFile());
+    const assertion = expect(resultPromise).rejects.toThrow("still pending");
+
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(300 * 4);
+
+    await assertion;
+  });
+
   it("retries render final result when endpoint briefly returns pending", async () => {
     vi.useFakeTimers();
     vi.spyOn(globalThis, "fetch")
