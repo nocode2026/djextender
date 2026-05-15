@@ -23,3 +23,6 @@
 - Validation: `npm run build` passed after stricter analysis contract validation.
 - 2026-05-15: Hardened numeric validators in all sidecar clients to accept only finite numbers (reject `Infinity` and `-Infinity`, not just `NaN`).
 - Validation: `npm run build` passed after finite-number guard update.
+- 2026-05-15: Added `vitest` contract regression suite in `src/sidecarContracts.test.ts` covering analysis/stem/render/transform/QA client payload validation.
+- 2026-05-15: Tests revealed and fixed a real bug: `202 pending` was incorrectly treated as success via `Response.ok` in stem/render final-result fetch; now `202` is handled explicitly with retry and terminal pending error.
+- Validation: `npm run test:contracts` and `npm run build` both passed.

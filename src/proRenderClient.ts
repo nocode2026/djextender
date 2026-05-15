@@ -94,15 +94,18 @@ async function fetchRenderResultWithRetry(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const resultResp = await fetch(`${sidecarUrl}/render_result/${jobId}`, { signal });
 
-    if (resultResp.ok) {
-      return parseRenderResult(await resultResp.json());
+    if (resultResp.status === 202) {
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, RETRY_DELAY_MS);
+        });
+        continue;
+      }
+      throw new Error(`Render result still pending after ${MAX_ATTEMPTS} attempts`);
     }
 
-    if (resultResp.status === 202 && attempt < MAX_ATTEMPTS) {
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, RETRY_DELAY_MS);
-      });
-      continue;
+    if (resultResp.ok) {
+      return parseRenderResult(await resultResp.json());
     }
 
     await throwDetailedError(resultResp);
