@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:contracts": "vitest run src/sidecarContracts.test.ts",
+    "verify": "npm run test:contracts && npm run build",
+    "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

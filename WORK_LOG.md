@@ -29,3 +29,6 @@
 - 2026-05-15: Added shared sidecar HTTP helper (`src/sidecarHttp.ts`) and refactored analysis/stem/render/transform/QA clients to use unified error-detail extraction and error formatting.
 - 2026-05-15: Reused shared `sleep` helper for pending-result retry delays in stem/render clients.
 - Validation: `npm run test:contracts` and `npm run build` both passed after helper refactor.
+- 2026-05-15: Added CLI smoke script `scripts/smoke-sidecar.mjs` for quick sidecar checks (`/health` and optional `/analyze` with file upload).
+- 2026-05-15: Added npm scripts `smoke:sidecar` and `verify` (`test:contracts` + `build`) to speed up local release gates.
+- Validation: `npm run smoke:sidecar -- --help`, `npm run test:contracts`, and `npm run build` all passed.
