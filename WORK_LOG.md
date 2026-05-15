@@ -47,3 +47,6 @@
 - 2026-05-15: Refactored smoke script to export testable helpers (`parseArgs`, validators, and `main`) and added direct-run guard for CLI mode.
 - 2026-05-15: Added `scripts/smoke-sidecar.test.ts` covering argument parsing, engine/file validation, finite checks, and analysis payload validation.
 - Validation: `npm run verify` passed with 3 test files / 28 tests and successful production build.
+- 2026-05-15: Improved intro/outro rendering quality in sidecar: added adaptive loudness-matched transition crossfades and smoother equal-power fade curves.
+- 2026-05-15: Tuned deterministic stage balance (intro handover tonality and outro tail envelope) to reduce abrupt entry/exit perception.
+- Validation: editor diagnostics report no Python errors in `analysis-sidecar/main.py` after update.

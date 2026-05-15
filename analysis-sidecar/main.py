@@ -639,12 +639,51 @@ def _crossfade(a: np.ndarray, b: np.ndarray, fade_samples: int) -> np.ndarray:
     return np.concatenate([a[:-fade_samples], blend, b[fade_samples:]], axis=0).astype(np.float32)
 
 
+def _segment_rms(audio: np.ndarray) -> float:
+    if audio.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(audio), dtype=np.float64) + 1e-12))
+
+
+def _match_transition_loudness(reference_tail: np.ndarray, candidate_head: np.ndarray, max_db: float = 4.0) -> np.ndarray:
+    """Match candidate segment loudness to reference with bounded gain correction.
+
+    This reduces perceived jumps at segment handover without over-compressing dynamics.
+    """
+    ref_rms = _segment_rms(reference_tail)
+    cand_rms = _segment_rms(candidate_head)
+    if ref_rms <= 1e-8 or cand_rms <= 1e-8:
+        return candidate_head
+
+    gain = ref_rms / cand_rms
+    max_ratio = float(10.0 ** (max_db / 20.0))
+    gain = float(np.clip(gain, 1.0 / max_ratio, max_ratio))
+    matched = candidate_head.astype(np.float32) * gain
+    return _safe_mix(matched)
+
+
+def _crossfade_matched(a: np.ndarray, b: np.ndarray, fade_samples: int, max_match_db: float = 4.0) -> np.ndarray:
+    """Crossfade with bounded loudness matching on overlap segments."""
+    if fade_samples <= 0 or a.shape[0] == 0 or b.shape[0] == 0:
+        return np.concatenate([a, b], axis=0)
+
+    fade_samples = min(fade_samples, a.shape[0], b.shape[0])
+    ref_tail = a[-fade_samples:]
+    cand_head = b[:fade_samples]
+    cand_head = _match_transition_loudness(ref_tail, cand_head, max_db=max_match_db)
+    b_matched = b.copy().astype(np.float32)
+    b_matched[:fade_samples] = cand_head
+    return _crossfade(a, b_matched, fade_samples)
+
+
 def _fade(audio: np.ndarray, fade_samples: int, fade_in: bool) -> np.ndarray:
     if fade_samples <= 0 or audio.shape[0] == 0:
         return audio
 
     fade_samples = min(fade_samples, audio.shape[0])
-    curve = np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
+    # Equal-power curve sounds smoother than linear ramps on dense material.
+    t = np.linspace(0.0, np.pi / 2, fade_samples, dtype=np.float32)
+    curve = np.sin(t)
     result = audio.copy()
     if fade_in:
         result[:fade_samples] *= curve[:, None]
@@ -825,11 +864,14 @@ def _build_intro(
     d4 = _loop_to_length(drums, stage_lengths[3], o)
     b4 = _loop_to_length(bass, stage_lengths[3], o)
     ot4 = _loop_to_length(other, stage_lengths[3], o)
-    stage4 = d4 * 1.00 + b4 * 0.98 + ot4 * 0.26
+    # Keep final intro closer to source tone to avoid abrupt handover.
+    stage4_env = np.linspace(0.0, 1.0, stage_lengths[3], dtype=np.float32)[:, None]
+    stage4_other_gain = 0.26 + (0.44 * stage4_env)
+    stage4 = d4 * 1.00 + b4 * 0.98 + ot4 * stage4_other_gain
     if include_vocal_hook:
         v4 = _loop_to_length(vocals, stage_lengths[3], o)
-        stage4 = stage4 + v4 * 0.08
-    stage4 = _volume_automation(stage4, [1.00, 1.00, 1.00, 1.00])
+        stage4 = stage4 + v4 * (0.06 + 0.03 * stage4_env)
+    stage4 = _volume_automation(stage4, [0.98, 1.00, 1.00, 1.00])
 
     xf = min(8192, max(1024, part // 8))
     intro = stage1
@@ -903,8 +945,8 @@ def _build_outro(
     d4_full = d4
     d4_lp = _lp_filter(d4, sr, 700.0)
     d4_env = np.linspace(0.0, 1.0, stage_lengths[3], dtype=np.float32)[:, None]
-    stage4 = d4_full * (1.0 - d4_env * 0.68) + d4_lp * (d4_env * 0.68)
-    stage4 = _volume_automation(stage4, [0.82, 0.70, 0.58, 0.46])
+    stage4 = d4_full * (1.0 - d4_env * 0.60) + d4_lp * (d4_env * 0.60)
+    stage4 = _volume_automation(stage4, [0.84, 0.74, 0.64, 0.54])
 
     xf = min(8192, max(1024, part // 8))
     outro = stage1
@@ -1986,12 +2028,12 @@ def _run_render_extended_blocking(render_job: str, raw_source: bytes, payload: d
             )
 
             if intro_mix.shape[0] > 0 and source_mix.shape[0] > 0:
-                combined = _crossfade(intro_mix, source_mix, cf_samples)
+                combined = _crossfade_matched(intro_mix, source_mix, cf_samples, max_match_db=4.0)
             else:
                 combined = np.concatenate([intro_mix, source_mix], axis=0)
 
             if outro_mix.shape[0] > 0 and combined.shape[0] > 0:
-                rendered = _crossfade(combined, outro_mix, cf_samples)
+                rendered = _crossfade_matched(combined, outro_mix, cf_samples, max_match_db=4.0)
             else:
                 rendered = np.concatenate([combined, outro_mix], axis=0)
             rendered = _safe_mix(rendered)
