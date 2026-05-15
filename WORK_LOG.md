@@ -38,5 +38,8 @@
 - Validation: `npm run test:contracts` (12/12) and `npm run build` passed.
 - 2026-05-15: Expanded contract tests with render `202 pending` max-attempt failure case and non-finite transform value case (`durationSeconds=Infinity`).
 - Validation: `npm run test:contracts` (14/14) and `npm run build` passed.
+- 2026-05-15: Added unit tests for shared HTTP helper (`src/sidecarHttp.test.ts`) covering JSON detail, text fallback, statusText fallback, throw formatting, and `sleep` timing behavior.
+- 2026-05-15: Updated `verify` script to run full test suite (`npm run test`) before build.
+- Validation: `npm run verify` passed with 2 test files / 19 tests.
 - 2026-05-15: Added GitHub Actions workflow `.github/workflows/verify.yml` to run `npm run verify` on push/PR to `main`.
 - Validation: local `npm run verify` passed before publish.
