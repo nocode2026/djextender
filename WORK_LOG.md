@@ -36,5 +36,7 @@
 - Validation: `npm run test:contracts` and `npm run build` passed after test expansion.
 - 2026-05-15: Expanded contract tests with non-finite numeric cases for analysis (`bpm=Infinity`) and QA (`bpmMeasured=Infinity`) to guard finite-number validators.
 - Validation: `npm run test:contracts` (12/12) and `npm run build` passed.
+- 2026-05-15: Expanded contract tests with render `202 pending` max-attempt failure case and non-finite transform value case (`durationSeconds=Infinity`).
+- Validation: `npm run test:contracts` (14/14) and `npm run build` passed.
 - 2026-05-15: Added GitHub Actions workflow `.github/workflows/verify.yml` to run `npm run verify` on push/PR to `main`.
 - Validation: local `npm run verify` passed before publish.

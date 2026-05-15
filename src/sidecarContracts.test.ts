@@ -269,6 +269,31 @@ describe("sidecar contract validators", () => {
     expect(result.takes[0].takeIndex).toBe(1);
   });
 
+  it("fails render result fetch after max pending attempts", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(jsonResponse(200, { jobId: "render123", status: "started" }))
+      .mockResolvedValueOnce(jsonResponse(200, validRenderProgress))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "render123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "render123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "render123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "render123" }))
+      .mockResolvedValueOnce(jsonResponse(202, { status: "pending", jobId: "render123" }));
+
+    const resultPromise = renderExtendedWithProSidecar({
+      sourceFile: makeFile(),
+      request: {},
+      plan: {},
+      stemPackage: {},
+    });
+    const assertion = expect(resultPromise).rejects.toThrow("still pending");
+
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(300 * 4);
+
+    await assertion;
+  });
+
   it("accepts valid transform preview and audio payloads", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(jsonResponse(200, validTransformPreview))
@@ -305,6 +330,21 @@ describe("sidecar contract validators", () => {
         pitchSemitones: 1,
       }),
     ).rejects.toThrow("transformEngine");
+  });
+
+  it("rejects non-finite transform numeric value", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(200, { ...validTransformPreview, durationSeconds: Number.POSITIVE_INFINITY }),
+    );
+
+    await expect(
+      transformPreviewWithProSidecar({
+        sourceFile: makeFile(),
+        sourceBpm: 124,
+        targetBpm: 126,
+        pitchSemitones: 1,
+      }),
+    ).rejects.toThrow("durationSeconds");
   });
 
   it("accepts valid QA payload and rejects malformed gate", async () => {
