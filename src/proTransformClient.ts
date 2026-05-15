@@ -1,3 +1,5 @@
+import { throwSidecarHttpError } from "./sidecarHttp";
+
 export type TransformPreviewResult = {
   jobId: string;
   outputDirectory: string;
@@ -87,20 +89,6 @@ function parseTransformAudioResult(payload: unknown): TransformAudioResult {
   };
 }
 
-async function throwDetailedError(response: Response): Promise<never> {
-  let detail = response.statusText;
-  try {
-    const body = (await response.json()) as { detail?: string };
-    if (body.detail) {
-      detail = body.detail;
-    }
-  } catch {
-    // Ignore JSON parse errors and fallback to status text.
-  }
-
-  throw new Error(`Sidecar transform failed (${response.status}): ${detail}`);
-}
-
 export async function transformPreviewWithProSidecar(args: {
   sourceFile: File;
   sourceBpm: number;
@@ -124,7 +112,7 @@ export async function transformPreviewWithProSidecar(args: {
   });
 
   if (!response.ok) {
-    await throwDetailedError(response);
+    await throwSidecarHttpError(response, "Sidecar transform");
   }
 
   return parseTransformPreviewResult(await response.json());
@@ -151,7 +139,7 @@ export async function transformAudioWithProSidecar(args: {
   });
 
   if (!response.ok) {
-    await throwDetailedError(response);
+    await throwSidecarHttpError(response, "Sidecar transform");
   }
 
   return parseTransformAudioResult(await response.json());

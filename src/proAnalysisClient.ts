@@ -1,4 +1,5 @@
 import type { AudioAnalysisResult } from "./audioAnalyzer";
+import { throwSidecarHttpError } from "./sidecarHttp";
 
 const DEFAULT_SIDECAR_URL = "http://127.0.0.1:8765";
 
@@ -28,7 +29,7 @@ function asBoolean(value: unknown, fieldName: string): boolean {
 }
 
 function asNumberArray(value: unknown, fieldName: string): number[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "number" || Number.isNaN(item))) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "number" || !Number.isFinite(item))) {
     throw new Error(`Invalid sidecar payload: ${fieldName} must be number[]`);
   }
   return value;
@@ -128,20 +129,6 @@ function assertAnalysisPayload(payload: unknown): AudioAnalysisResult {
   return payload as AudioAnalysisResult;
 }
 
-async function throwDetailedError(response: Response): Promise<never> {
-  let detail = response.statusText;
-  try {
-    const body = (await response.json()) as { detail?: string };
-    if (body.detail) {
-      detail = body.detail;
-    }
-  } catch {
-    // Ignore JSON parse failures and fallback to status text.
-  }
-
-  throw new Error(`Sidecar analysis failed (${response.status}): ${detail}`);
-}
-
 export async function analyzeWithProSidecar(
   file: File,
   options?: { analysisEngine?: "librosa" | "essentia" | "hybrid" },
@@ -159,7 +146,7 @@ export async function analyzeWithProSidecar(
   });
 
   if (!response.ok) {
-    await throwDetailedError(response);
+    await throwSidecarHttpError(response, "Sidecar analysis");
   }
 
   return assertAnalysisPayload(await response.json());

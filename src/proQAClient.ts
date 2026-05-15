@@ -1,3 +1,5 @@
+import { throwSidecarHttpError } from "./sidecarHttp";
+
 const SIDECAR =
   (import.meta.env.VITE_ANALYSIS_SIDECAR_URL as string | undefined) ??
   "http://127.0.0.1:8765";
@@ -127,8 +129,7 @@ export async function qaRender(params: {
 
   const res = await fetch(`${SIDECAR}/qa_render`, { method: "POST", body: fd });
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`QA render failed (${res.status}): ${text}`);
+    await throwSidecarHttpError(res, "QA render");
   }
   return parseQARenderResult(await res.json());
 }

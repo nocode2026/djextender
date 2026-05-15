@@ -1,3 +1,5 @@
+import { sleep, throwSidecarHttpError } from "./sidecarHttp";
+
 export type StemPackageResult = {
   jobId: string;
   model: string;
@@ -94,9 +96,7 @@ async function fetchStemResultWithRetry(
 
     if (resultResp.status === 202) {
       if (attempt < MAX_ATTEMPTS) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, RETRY_DELAY_MS);
-        });
+        await sleep(RETRY_DELAY_MS);
         continue;
       }
       throw new Error(`Stem result still pending after ${MAX_ATTEMPTS} attempts`);
@@ -106,7 +106,7 @@ async function fetchStemResultWithRetry(
       return parseStemResult(await resultResp.json());
     }
 
-    await throwDetailedError(resultResp);
+    await throwSidecarHttpError(resultResp, "Sidecar stem separation");
   }
 
   throw new Error("Unexpected stem result fetch state");
@@ -171,20 +171,6 @@ function parseStemResult(payload: unknown): StemPackageResult {
   };
 }
 
-async function throwDetailedError(response: Response): Promise<never> {
-  let detail = response.statusText;
-  try {
-    const body = (await response.json()) as { detail?: string };
-    if (body.detail) {
-      detail = body.detail;
-    }
-  } catch {
-    // Ignore JSON parse errors and keep status text.
-  }
-
-  throw new Error(`Sidecar stem separation failed (${response.status}): ${detail}`);
-}
-
 export async function separateWithProSidecar(
   file: File,
   options?: {
@@ -206,7 +192,7 @@ export async function separateWithProSidecar(
   });
 
   if (!startResp.ok) {
-    await throwDetailedError(startResp);
+    await throwSidecarHttpError(startResp, "Sidecar stem separation");
   }
 
   const started = parseStartedPayload(await startResp.json());

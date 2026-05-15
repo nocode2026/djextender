@@ -1,3 +1,5 @@
+import { sleep, throwSidecarHttpError } from "./sidecarHttp";
+
 export type RenderExtendedResult = {
   jobId: string;
   outputDirectory: string;
@@ -96,9 +98,7 @@ async function fetchRenderResultWithRetry(
 
     if (resultResp.status === 202) {
       if (attempt < MAX_ATTEMPTS) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, RETRY_DELAY_MS);
-        });
+        await sleep(RETRY_DELAY_MS);
         continue;
       }
       throw new Error(`Render result still pending after ${MAX_ATTEMPTS} attempts`);
@@ -108,7 +108,7 @@ async function fetchRenderResultWithRetry(
       return parseRenderResult(await resultResp.json());
     }
 
-    await throwDetailedError(resultResp);
+    await throwSidecarHttpError(resultResp, "Sidecar render");
   }
 
   throw new Error("Unexpected render result fetch state");
@@ -170,20 +170,6 @@ function parseRenderResult(payload: unknown): RenderExtendedResult {
   };
 }
 
-async function throwDetailedError(response: Response): Promise<never> {
-  let detail = response.statusText;
-  try {
-    const body = (await response.json()) as { detail?: string };
-    if (body.detail) {
-      detail = body.detail;
-    }
-  } catch {
-    // Ignore JSON parse errors and fallback to status text.
-  }
-
-  throw new Error(`Sidecar render failed (${response.status}): ${detail}`);
-}
-
 export async function renderExtendedWithProSidecar(args: {
   sourceFile: File;
   request: Record<string, unknown>;
@@ -213,7 +199,7 @@ export async function renderExtendedWithProSidecar(args: {
   });
 
   if (!startResp.ok) {
-    await throwDetailedError(startResp);
+    await throwSidecarHttpError(startResp, "Sidecar render");
   }
 
   const started = parseStartedPayload(await startResp.json());

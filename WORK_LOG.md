@@ -26,3 +26,6 @@
 - 2026-05-15: Added `vitest` contract regression suite in `src/sidecarContracts.test.ts` covering analysis/stem/render/transform/QA client payload validation.
 - 2026-05-15: Tests revealed and fixed a real bug: `202 pending` was incorrectly treated as success via `Response.ok` in stem/render final-result fetch; now `202` is handled explicitly with retry and terminal pending error.
 - Validation: `npm run test:contracts` and `npm run build` both passed.
+- 2026-05-15: Added shared sidecar HTTP helper (`src/sidecarHttp.ts`) and refactored analysis/stem/render/transform/QA clients to use unified error-detail extraction and error formatting.
+- 2026-05-15: Reused shared `sleep` helper for pending-result retry delays in stem/render clients.
+- Validation: `npm run test:contracts` and `npm run build` both passed after helper refactor.
