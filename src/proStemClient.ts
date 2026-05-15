@@ -39,7 +39,7 @@ function asString(value: unknown, fieldName: string): string {
 }
 
 function asNumber(value: unknown, fieldName: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`Invalid sidecar payload: ${fieldName} must be a number`);
   }
   return value;

@@ -21,3 +21,5 @@
 - Validation: `npm run build` passed after race-condition resilience update.
 - 2026-05-15: Tightened analysis payload validation with nested checks for structure sections, timeline markers, gates, and analyzer engine value.
 - Validation: `npm run build` passed after stricter analysis contract validation.
+- 2026-05-15: Hardened numeric validators in all sidecar clients to accept only finite numbers (reject `Infinity` and `-Infinity`, not just `NaN`).
+- Validation: `npm run build` passed after finite-number guard update.
