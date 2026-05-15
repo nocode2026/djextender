@@ -178,6 +178,14 @@ describe("sidecar contract validators", () => {
     await expect(analyzeWithProSidecar(makeFile())).rejects.toThrow("phraseBars");
   });
 
+  it("rejects non-finite analysis numeric value", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(200, { ...validAnalysisPayload, bpm: Number.POSITIVE_INFINITY }),
+    );
+
+    await expect(analyzeWithProSidecar(makeFile())).rejects.toThrow("bpm");
+  });
+
   it("rejects stem start payload without started status", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse(200, { jobId: "stem123", status: "queued" }),
@@ -327,5 +335,21 @@ describe("sidecar contract validators", () => {
         outroBars: 32,
       }),
     ).rejects.toThrow("gates[0].unit");
+  });
+
+  it("rejects non-finite QA numeric value", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse(200, { ...validQaResult, bpmMeasured: Number.POSITIVE_INFINITY }),
+    );
+
+    await expect(
+      qaRender({
+        wavPath: "C:/tmp/render/take_1.wav",
+        expectedBpm: 124,
+        expectedBars: 100,
+        introBars: 32,
+        outroBars: 32,
+      }),
+    ).rejects.toThrow("bpmMeasured");
   });
 });
