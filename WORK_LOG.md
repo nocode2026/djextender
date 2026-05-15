@@ -19,3 +19,5 @@
 - Validation: `npm run build` passed after expanding client-side contract checks.
 - 2026-05-15: Added `status=started` validation for stem/render start responses and short retry handling for `202 pending` final-result fetches.
 - Validation: `npm run build` passed after race-condition resilience update.
+- 2026-05-15: Tightened analysis payload validation with nested checks for structure sections, timeline markers, gates, and analyzer engine value.
+- Validation: `npm run build` passed after stricter analysis contract validation.
