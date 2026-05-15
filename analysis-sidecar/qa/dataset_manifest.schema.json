@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DJ Extend QA Dataset Manifest",
+  "type": "object",
+  "required": ["tracks"],
+  "properties": {
+    "tracks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "expected"],
+        "properties": {
+          "file": { "type": "string" },
+          "expected": {
+            "type": "object",
+            "required": ["bpm", "key", "phraseBars"],
+            "properties": {
+              "bpm": { "type": "number" },
+              "key": { "type": "string" },
+              "phraseBars": { "type": "integer", "enum": [4, 8, 16] },
+              "downbeatOffsetSeconds": { "type": "number" },
+              "allowKeyMismatch": { "type": "boolean" },
+              "description": { "type": "string" }
+            }
+          },
+          "renderRequest": {
+            "type": "object",
+            "properties": {
+              "operationMode": {
+                "type": "string",
+                "enum": ["intro", "outro", "intro_outro"]
+              },
+              "introBars": { "type": "integer" },
+              "outroBars": { "type": "integer" },
+              "takeCount": { "type": "integer", "minimum": 1, "maximum": 5 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

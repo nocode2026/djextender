@@ -1,0 +1,21 @@
+{
+  "tracks": [
+    {
+      "file": "deep_house_124bpm.wav",
+      "expected": {
+        "bpm": 124,
+        "key": "F minor",
+        "phraseBars": 8,
+        "downbeatOffsetSeconds": 0.0,
+        "allowKeyMismatch": false,
+        "description": "Reference deep house grid track"
+      },
+      "renderRequest": {
+        "operationMode": "intro_outro",
+        "introBars": 32,
+        "outroBars": 32,
+        "takeCount": 3
+      }
+    }
+  ]
+}

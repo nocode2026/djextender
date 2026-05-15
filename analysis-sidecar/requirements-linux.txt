@@ -1,0 +1,2 @@
+-r requirements.txt
+essentia==2.1b6.dev184

@@ -30,9 +30,11 @@ analysis-sidecar/.env
 analysis-sidecar/.venv-wsl/
 analysis-sidecar/.venv-wsl2/
 analysis-sidecar/.venv/
+analysis-sidecar/.venv311/
 .venv-1/
 
 # Sidecar runtime data
 analysis-sidecar/runs/
 analysis-sidecar/__pycache__/
+analysis-sidecar/**/__pycache__/
 analysis-sidecar/*.pyc

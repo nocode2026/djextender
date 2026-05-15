@@ -7,7 +7,8 @@ Desktop-first MVP for generating a deterministic plan for DJ-safe intro and outr
 - Standalone shell built with Tauri + React + TypeScript.
 - First desktop screen for manual track intake and extension planning.
 - Rust planner that turns BPM, key, phrase size and 32-bar targets into arrangement sections.
-- Export notes and warnings for the later audio rendering engine.
+- Pro analysis, stem separation, transform preview and extended render all go through `analysis-sidecar/`.
+- Export notes and warnings are generated from the current planner and sidecar contract.
 
 ## MVP Workflow
 
@@ -31,9 +32,9 @@ npm install
 npm run tauri dev
 ```
 
-## Pro Analysis Sidecar (Recommended)
+## Pro Analysis Sidecar
 
-Run sidecar first to enable production-grade analysis path before planner generation.
+Run the sidecar to enable the production-grade analysis and render path.
 
 ```bash
 cd analysis-sidecar
@@ -120,7 +121,7 @@ npm run build
 
 ## Next Steps
 
-1. Add real waveform analysis: BPM, key, downbeat, phrase detection.
-2. Add local file system import/export flow from Tauri commands.
-3. Add stem-aware render engine for deterministic intro/outro creation.
-4. Add optional cloud AI continuation mode for more creative transitions.
+1. Tighten the sidecar contract and add a regression dataset for analysis, stem separation and render QA.
+2. Add more explicit import/export plumbing from Tauri commands so the desktop flow is less dependent on path assumptions.
+3. Expand the planner with more cue-point and transition heuristics driven by the analysis snapshot.
+4. Keep optional cloud AI continuation mode isolated behind the existing pro gates.

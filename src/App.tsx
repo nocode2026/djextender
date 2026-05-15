@@ -279,11 +279,12 @@ function App() {
   const srcBeatgridRef = useRef<HTMLCanvasElement | null>(null);
   const [sourceBlobUrl, setSourceBlobUrl] = useState("");
 
-  // Cleanup blob URL on unmount
+  // Cleanup blob URL whenever it changes and on unmount.
   useEffect(() => {
-    return () => { if (sourceBlobUrl) URL.revokeObjectURL(sourceBlobUrl); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      if (sourceBlobUrl) URL.revokeObjectURL(sourceBlobUrl);
+    };
+  }, [sourceBlobUrl]);
   const [srcPlaying, setSrcPlaying] = useState(false);
   const [srcTime, setSrcTime] = useState(0);
   const [srcDuration, setSrcDuration] = useState(0);
