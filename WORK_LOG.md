@@ -13,3 +13,5 @@
 - Validation: `npm run build` passed after polling error-handling changes.
 - 2026-05-15: Fixed catch-path in sidecar progress polling so explicit HTTP polling errors are rejected immediately (not treated as transient network silence).
 - Validation: `npm run build` passed after catch-path fix.
+- 2026-05-15: Added runtime validation guards for sidecar payloads in stem/render clients (start/progress/result) to fail early on malformed JSON contracts.
+- Validation: `npm run build` passed after sidecar payload validation hardening.

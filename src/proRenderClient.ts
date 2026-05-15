@@ -29,6 +29,112 @@ export type RenderProgress = {
 
 const DEFAULT_SIDECAR_URL = "http://127.0.0.1:8765";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asString(value: unknown, fieldName: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be a string`);
+  }
+  return value;
+}
+
+function asNumber(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be a number`);
+  }
+  return value;
+}
+
+function asBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
+function asNullableNumber(value: unknown, fieldName: string): number | null {
+  if (value === null) {
+    return null;
+  }
+  return asNumber(value, fieldName);
+}
+
+function asStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be string[]`);
+  }
+  return value;
+}
+
+function parseStartedPayload(payload: unknown): { jobId: string } {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid sidecar payload: started response must be an object");
+  }
+  const jobId = asString(payload.jobId, "jobId").trim();
+  if (!jobId) {
+    throw new Error("Invalid sidecar payload: jobId cannot be empty");
+  }
+  return { jobId };
+}
+
+function parseRenderProgress(payload: unknown): RenderProgress {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid sidecar payload: progress response must be an object");
+  }
+  return {
+    step: asNumber(payload.step, "step"),
+    total: asNumber(payload.total, "total"),
+    label: asString(payload.label, "label"),
+    done: asBoolean(payload.done, "done"),
+    error: asString(payload.error, "error"),
+    last_heartbeat: asNullableNumber(payload.last_heartbeat, "last_heartbeat"),
+    started_at: asNullableNumber(payload.started_at, "started_at"),
+    elapsed_seconds: asNumber(payload.elapsed_seconds, "elapsed_seconds"),
+    eta_seconds: asNullableNumber(payload.eta_seconds, "eta_seconds"),
+  };
+}
+
+function parseRenderResult(payload: unknown): RenderExtendedResult {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid sidecar payload: render result must be an object");
+  }
+  const takesRaw = payload.takes;
+  if (!Array.isArray(takesRaw)) {
+    throw new Error("Invalid sidecar payload: takes must be an array");
+  }
+
+  const takes = takesRaw.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new Error(`Invalid sidecar payload: takes[${index}] must be an object`);
+    }
+    return {
+      takeIndex: asNumber(item.takeIndex, `takes[${index}].takeIndex`),
+      label: asString(item.label, `takes[${index}].label`),
+      outputPath: asString(item.outputPath, `takes[${index}].outputPath`),
+      wavPath: asString(item.wavPath, `takes[${index}].wavPath`),
+      mp3Path: asString(item.mp3Path, `takes[${index}].mp3Path`),
+      aiffPath: asString(item.aiffPath, `takes[${index}].aiffPath`),
+      durationSeconds: asNumber(item.durationSeconds, `takes[${index}].durationSeconds`),
+      sampleRate: asNumber(item.sampleRate, `takes[${index}].sampleRate`),
+    };
+  });
+
+  const renderEngine = asString(payload.renderEngine, "renderEngine");
+  if (renderEngine !== "deterministic-sidecar-v1") {
+    throw new Error("Invalid sidecar payload: renderEngine must be deterministic-sidecar-v1");
+  }
+
+  return {
+    jobId: asString(payload.jobId, "jobId"),
+    outputDirectory: asString(payload.outputDirectory, "outputDirectory"),
+    takes,
+    warnings: asStringArray(payload.warnings, "warnings"),
+    renderEngine: "deterministic-sidecar-v1",
+  };
+}
+
 async function throwDetailedError(response: Response): Promise<never> {
   let detail = response.statusText;
   try {
@@ -75,7 +181,7 @@ export async function renderExtendedWithProSidecar(args: {
     await throwDetailedError(startResp);
   }
 
-  const started = (await startResp.json()) as { jobId: string; status: string };
+  const started = parseStartedPayload(await startResp.json());
   const { jobId } = started;
 
   // Poll progress until done or error
@@ -105,7 +211,7 @@ export async function renderExtendedWithProSidecar(args: {
             }
             throw new Error(`Progress polling failed (${r.status}): ${detail}`);
           }
-          return r.json() as Promise<RenderProgress>;
+          return parseRenderProgress(await r.json());
         })
         .then((data: RenderProgress) => {
           lastSuccessfulPoll = Date.now();
@@ -144,5 +250,5 @@ export async function renderExtendedWithProSidecar(args: {
   if (!resultResp.ok) {
     await throwDetailedError(resultResp);
   }
-  return (await resultResp.json()) as RenderExtendedResult;
+  return parseRenderResult(await resultResp.json());
 }
