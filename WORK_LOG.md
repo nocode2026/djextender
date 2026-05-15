@@ -9,3 +9,5 @@
 - 2026-05-15: Added `.gitignore` coverage for `analysis-sidecar/.venv311/` and recursive `analysis-sidecar/**/__pycache__/`.
 - 2026-05-15: Made `analysis-sidecar/qa/smoke_essentia.py` portable (CLI args instead of hardcoded local path).
 - Final validation: `npm run build` passed after all changes.
+- 2026-05-15: Hardened sidecar progress polling in `proStemClient` and `proRenderClient` to fail fast on HTTP 4xx/5xx instead of waiting for silence timeout.
+- Validation: `npm run build` passed after polling error-handling changes.

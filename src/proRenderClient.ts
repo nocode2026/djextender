@@ -92,7 +92,21 @@ export async function renderExtendedWithProSidecar(args: {
       }
 
       fetch(`${sidecarUrl}/progress/${jobId}`, { signal: args.signal })
-        .then((r) => r.json())
+        .then(async (r) => {
+          if (!r.ok) {
+            let detail = r.statusText;
+            try {
+              const body = (await r.json()) as { detail?: string };
+              if (body.detail) {
+                detail = body.detail;
+              }
+            } catch {
+              // Ignore parse errors and use status text.
+            }
+            throw new Error(`Progress polling failed (${r.status}): ${detail}`);
+          }
+          return r.json() as Promise<RenderProgress>;
+        })
         .then((data: RenderProgress) => {
           lastSuccessfulPoll = Date.now();
           args.onProgress?.(data);
