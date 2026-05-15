@@ -121,7 +121,13 @@ export async function renderExtendedWithProSidecar(args: {
             resolve();
           }
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (error instanceof Error && error.message.startsWith("Progress polling failed")) {
+            clearInterval(timer);
+            reject(error);
+            return;
+          }
+
           // Network error — check silence timeout
           if (Date.now() - lastSuccessfulPoll > MAX_SILENCE_MS) {
             clearInterval(timer);
