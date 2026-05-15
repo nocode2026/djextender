@@ -34,3 +34,5 @@
 - Validation: `npm run smoke:sidecar -- --help`, `npm run test:contracts`, and `npm run build` all passed.
 - 2026-05-15: Expanded contract regression tests with stem `202 pending` scenarios (retry success + max-attempt failure) and fixed async assertion ordering to avoid unhandled rejection noise.
 - Validation: `npm run test:contracts` and `npm run build` passed after test expansion.
+- 2026-05-15: Added GitHub Actions workflow `.github/workflows/verify.yml` to run `npm run verify` on push/PR to `main`.
+- Validation: local `npm run verify` passed before publish.
