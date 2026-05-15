@@ -71,10 +71,42 @@ function parseStartedPayload(payload: unknown): { jobId: string } {
     throw new Error("Invalid sidecar payload: started response must be an object");
   }
   const jobId = asString(payload.jobId, "jobId").trim();
+  const status = asString(payload.status, "status");
   if (!jobId) {
     throw new Error("Invalid sidecar payload: jobId cannot be empty");
   }
+  if (status !== "started") {
+    throw new Error("Invalid sidecar payload: status must be started");
+  }
   return { jobId };
+}
+
+async function fetchStemResultWithRetry(
+  sidecarUrl: string,
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<StemPackageResult> {
+  const MAX_ATTEMPTS = 5;
+  const RETRY_DELAY_MS = 300;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const resultResp = await fetch(`${sidecarUrl}/stem_result/${jobId}`, { signal });
+
+    if (resultResp.ok) {
+      return parseStemResult(await resultResp.json());
+    }
+
+    if (resultResp.status === 202 && attempt < MAX_ATTEMPTS) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, RETRY_DELAY_MS);
+      });
+      continue;
+    }
+
+    await throwDetailedError(resultResp);
+  }
+
+  throw new Error("Unexpected stem result fetch state");
 }
 
 function parseStemProgress(payload: unknown): StemProgress {
@@ -241,11 +273,5 @@ export async function separateWithProSidecar(
   });
 
   // Fetch final result
-  const resultResp = await fetch(`${sidecarUrl}/stem_result/${jobId}`, {
-    signal: options?.signal,
-  });
-  if (!resultResp.ok) {
-    await throwDetailedError(resultResp);
-  }
-  return parseStemResult(await resultResp.json());
+  return fetchStemResultWithRetry(sidecarUrl, jobId, options?.signal);
 }
