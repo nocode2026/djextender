@@ -15,3 +15,5 @@
 - Validation: `npm run build` passed after catch-path fix.
 - 2026-05-15: Added runtime validation guards for sidecar payloads in stem/render clients (start/progress/result) to fail early on malformed JSON contracts.
 - Validation: `npm run build` passed after sidecar payload validation hardening.
+- 2026-05-15: Added runtime payload validation in analysis, transform, and QA clients for required response fields.
+- Validation: `npm run build` passed after expanding client-side contract checks.

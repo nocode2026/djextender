@@ -22,6 +22,71 @@ export type TransformAudioResult = {
 
 const DEFAULT_SIDECAR_URL = "http://127.0.0.1:8765";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asString(value: unknown, fieldName: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be a string`);
+  }
+  return value;
+}
+
+function asNumber(value: unknown, fieldName: string): number {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be a number`);
+  }
+  return value;
+}
+
+function asStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`Invalid sidecar payload: ${fieldName} must be string[]`);
+  }
+  return value;
+}
+
+function parseTransformPreviewResult(payload: unknown): TransformPreviewResult {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid sidecar payload: transform preview result must be an object");
+  }
+  const transformEngine = asString(payload.transformEngine, "transformEngine");
+  if (transformEngine !== "rubberband-cli-v1") {
+    throw new Error("Invalid sidecar payload: transformEngine must be rubberband-cli-v1");
+  }
+  return {
+    jobId: asString(payload.jobId, "jobId"),
+    outputDirectory: asString(payload.outputDirectory, "outputDirectory"),
+    previewPath: asString(payload.previewPath, "previewPath"),
+    durationSeconds: asNumber(payload.durationSeconds, "durationSeconds"),
+    sampleRate: asNumber(payload.sampleRate, "sampleRate"),
+    warnings: asStringArray(payload.warnings, "warnings"),
+    transformEngine: "rubberband-cli-v1",
+  };
+}
+
+function parseTransformAudioResult(payload: unknown): TransformAudioResult {
+  if (!isRecord(payload)) {
+    throw new Error("Invalid sidecar payload: transform audio result must be an object");
+  }
+  const transformEngine = asString(payload.transformEngine, "transformEngine");
+  if (transformEngine !== "rubberband-cli-v1") {
+    throw new Error("Invalid sidecar payload: transformEngine must be rubberband-cli-v1");
+  }
+  return {
+    jobId: asString(payload.jobId, "jobId"),
+    outputDirectory: asString(payload.outputDirectory, "outputDirectory"),
+    wavPath: asString(payload.wavPath, "wavPath"),
+    mp3Path: asString(payload.mp3Path, "mp3Path"),
+    aiffPath: asString(payload.aiffPath, "aiffPath"),
+    durationSeconds: asNumber(payload.durationSeconds, "durationSeconds"),
+    sampleRate: asNumber(payload.sampleRate, "sampleRate"),
+    warnings: asStringArray(payload.warnings, "warnings"),
+    transformEngine: "rubberband-cli-v1",
+  };
+}
+
 async function throwDetailedError(response: Response): Promise<never> {
   let detail = response.statusText;
   try {
@@ -62,7 +127,7 @@ export async function transformPreviewWithProSidecar(args: {
     await throwDetailedError(response);
   }
 
-  return (await response.json()) as TransformPreviewResult;
+  return parseTransformPreviewResult(await response.json());
 }
 
 export async function transformAudioWithProSidecar(args: {
@@ -89,5 +154,5 @@ export async function transformAudioWithProSidecar(args: {
     await throwDetailedError(response);
   }
 
-  return (await response.json()) as TransformAudioResult;
+  return parseTransformAudioResult(await response.json());
 }
