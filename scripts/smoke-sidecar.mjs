@@ -1,8 +1,18 @@
-#!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-function parseArgs(argv) {
+export const ALLOWED_ENGINES = ["hybrid", "librosa", "essentia"];
+
+function readOptionValue(argv, index, optionName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`Missing value for ${optionName}`);
+  }
+  return value;
+}
+
+export function parseArgs(argv) {
   const args = {
     baseUrl: "http://127.0.0.1:8765",
     file: "",
@@ -17,26 +27,32 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === "--base-url") {
-      args.baseUrl = argv[i + 1] ?? args.baseUrl;
+      args.baseUrl = readOptionValue(argv, i, "--base-url");
       i += 1;
       continue;
     }
     if (arg === "--file") {
-      args.file = argv[i + 1] ?? "";
+      args.file = readOptionValue(argv, i, "--file");
       i += 1;
       continue;
     }
     if (arg === "--engine") {
-      args.engine = argv[i + 1] ?? args.engine;
+      args.engine = readOptionValue(argv, i, "--engine");
       i += 1;
       continue;
     }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    throw new Error(`Unexpected argument: ${arg}`);
   }
 
   return args;
 }
 
-function printHelp() {
+export function printHelp() {
   console.log("DJextender sidecar smoke script");
   console.log("");
   console.log("Usage:");
@@ -53,11 +69,11 @@ function assert(condition, message) {
   }
 }
 
-function isFiniteNumber(value) {
+export function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function validateAnalysisPayload(payload) {
+export function validateAnalysisPayload(payload) {
   assert(payload && typeof payload === "object", "analyze payload must be an object");
   assert(isFiniteNumber(payload.bpm), "analyze payload missing finite bpm");
   assert(typeof payload.musicalKey === "string" && payload.musicalKey.length > 0, "analyze payload missing musicalKey");
@@ -67,7 +83,21 @@ function validateAnalysisPayload(payload) {
   assert(Array.isArray(payload.gates), "analyze payload missing gates[]");
 }
 
-async function checkHealth(baseUrl) {
+export async function validateSmokeArgs(args) {
+  assert(typeof args.baseUrl === "string" && args.baseUrl.length > 0, "--base-url cannot be empty");
+  assert(ALLOWED_ENGINES.includes(args.engine), `--engine must be one of: ${ALLOWED_ENGINES.join(", ")}`);
+  if (args.file) {
+    const absolutePath = path.resolve(args.file);
+    try {
+      const stats = await fs.stat(absolutePath);
+      assert(stats.isFile(), `--file is not a regular file: ${absolutePath}`);
+    } catch {
+      throw new Error(`--file does not exist: ${absolutePath}`);
+    }
+  }
+}
+
+export async function checkHealth(baseUrl) {
   const res = await fetch(`${baseUrl}/health`);
   if (!res.ok) {
     const body = await res.text().catch(() => res.statusText);
@@ -79,7 +109,7 @@ async function checkHealth(baseUrl) {
   console.log(`[ok] health ${baseUrl}/health`);
 }
 
-async function runAnalyze(baseUrl, filePath, engine) {
+export async function runAnalyze(baseUrl, filePath, engine) {
   const absolutePath = path.resolve(filePath);
   const bytes = await fs.readFile(absolutePath);
   const blob = new Blob([bytes]);
@@ -104,12 +134,14 @@ async function runAnalyze(baseUrl, filePath, engine) {
   console.log(`[ok] bpm=${payload.bpm}, key=${payload.musicalKey}, phraseBars=${payload.phraseBars}`);
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   if (args.help) {
     printHelp();
     return;
   }
+
+  await validateSmokeArgs(args);
 
   await checkHealth(args.baseUrl);
 
@@ -122,8 +154,14 @@ async function main() {
   console.log("[done] sidecar smoke passed");
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`[fail] ${message}`);
-  process.exit(1);
-});
+const isDirectRun = process.argv[1]
+  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (isDirectRun) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[fail] ${message}`);
+    process.exit(1);
+  });
+}

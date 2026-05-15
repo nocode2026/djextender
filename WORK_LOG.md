@@ -43,3 +43,7 @@
 - Validation: `npm run verify` passed with 2 test files / 19 tests.
 - 2026-05-15: Added GitHub Actions workflow `.github/workflows/verify.yml` to run `npm run verify` on push/PR to `main`.
 - Validation: local `npm run verify` passed before publish.
+- 2026-05-15: Hardened `scripts/smoke-sidecar.mjs` argument handling (missing option values, unknown/extra args, strict engine allow-list, and optional file existence checks).
+- 2026-05-15: Refactored smoke script to export testable helpers (`parseArgs`, validators, and `main`) and added direct-run guard for CLI mode.
+- 2026-05-15: Added `scripts/smoke-sidecar.test.ts` covering argument parsing, engine/file validation, finite checks, and analysis payload validation.
+- Validation: `npm run verify` passed with 3 test files / 28 tests and successful production build.
